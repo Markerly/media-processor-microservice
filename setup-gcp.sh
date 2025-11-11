@@ -5,7 +5,7 @@
 
 set -e
 
-PROJECT_ID="glassy-tube"
+PROJECT_ID="glassy-tube-622"
 SERVICE_NAME="media-processor"
 REGION="us-central1"
 
