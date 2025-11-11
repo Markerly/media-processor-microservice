@@ -3,9 +3,10 @@ const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const winston = require('winston');
+const chalk = require('chalk');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8082;
 
 // Configure logger
 const logger = winston.createLogger({
@@ -37,12 +38,16 @@ app.get('/', (req, res) => {
   res.json({
     service: 'Media Processor Microservice',
     version: '1.0.0',
-    description: 'FFmpeg processing service for Cloud Run'
+    description: 'FFmpeg processing service for Cloud Run',
+    endpoints: {
+      health: 'GET /health',
+      generateThumbnail: 'POST /generate-thumbnail'
+    }
   });
 });
 
-// TODO: Add FFmpeg processing routes here
-// app.use('/process', require('./routes/process'));
+// Thumbnail generation routes
+app.use('/', require('./routes/thumbnail'));
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -56,5 +61,16 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
+  console.log(chalk.green.bold('\n✓ Media Processor Microservice Started'));
+  console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+  console.log(chalk.white('  Service:'), chalk.yellow('Media Processor'));
+  console.log(chalk.white('  Port:'), chalk.yellow(PORT));
+  console.log(chalk.white('  Status:'), chalk.green('Running'));
+  console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+  console.log(chalk.gray('  Endpoints:'));
+  console.log(chalk.gray('    GET  /health'));
+  console.log(chalk.gray('    POST /generate-thumbnail'));
+  console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'));
+
   logger.info(`Media processor service listening on port ${PORT}`);
 });
