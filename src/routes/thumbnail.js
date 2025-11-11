@@ -5,6 +5,7 @@
 const express = require('express');
 const fs = require('fs');
 const { generateThumbnail, cleanupThumbnail } = require('../services/thumbnailGenerator');
+const { thumbnailLimiter } = require('../middleware/rateLimiter');
 const chalk = require('chalk');
 
 const router = express.Router();
@@ -23,8 +24,9 @@ const router = express.Router();
  * }
  *
  * Returns: Thumbnail image file (image/jpeg)
+ * Rate limit: 50 requests per 15 minutes per IP
  */
-router.post('/generate-thumbnail', async (req, res) => {
+router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
     const { videoUrl, timePosition, size, quality } = req.body;
 
     // Validation

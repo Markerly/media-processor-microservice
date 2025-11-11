@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const winston = require('winston');
 const chalk = require('chalk');
+const { generalLimiter } = require('./middleware/rateLimiter');
 
 const app = express();
 const PORT = process.env.PORT || 8082;
@@ -27,6 +28,9 @@ app.use(helmet());
 app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: '50mb' }));
+
+// Apply general rate limiting to all routes (except health check)
+app.use(generalLimiter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -70,6 +74,10 @@ app.listen(PORT, () => {
   console.log(chalk.gray('  Endpoints:'));
   console.log(chalk.gray('    GET  /health'));
   console.log(chalk.gray('    POST /generate-thumbnail'));
+  console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+  console.log(chalk.gray('  Rate Limits:'));
+  console.log(chalk.gray('    General: 100 requests per 15 minutes'));
+  console.log(chalk.gray('    Thumbnails: 50 requests per 15 minutes'));
   console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'));
 
   logger.info(`Media processor service listening on port ${PORT}`);
