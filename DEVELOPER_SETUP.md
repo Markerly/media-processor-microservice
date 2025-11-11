@@ -2,7 +2,7 @@
 
 ## Project: Media Processor Microservice
 **Repository:** https://github.com/Markerly/media-processor-microservice  
-**Google Cloud Project:** glassy-tube
+**Google Cloud Project:** glassy-tube-622
 
 ---
 
@@ -28,10 +28,10 @@ npm install
 gcloud auth login
 
 # Set the project
-gcloud config set project glassy-tube
+gcloud config set project glassy-tube-622
 
 # Verify access
-gcloud projects describe glassy-tube
+gcloud projects describe glassy-tube-622
 ```
 
 ### 4. Test Local Development
@@ -133,13 +133,13 @@ app.use('/process', require('./routes/process'));
 ### Example API Endpoints (After Implementation)
 ```bash
 # Convert video format
-curl -X POST https://media-processor-glassy-tube-us-central1.a.run.app/process/convert \
+curl -X POST https://media-processor-glassy-tube-622-us-central1.a.run.app/process/convert \
   -F "file=@video.mp4" \
   -F "format=webm" \
   -F "quality=720p"
 
 # Extract audio
-curl -X POST https://media-processor-glassy-tube-us-central1.a.run.app/process/extract-audio \
+curl -X POST https://media-processor-glassy-tube-622-us-central1.a.run.app/process/extract-audio \
   -F "file=@video.mp4" \
   -F "format=mp3"
 ```
@@ -149,7 +149,7 @@ curl -X POST https://media-processor-glassy-tube-us-central1.a.run.app/process/e
 ## Support
 
 - **Repository Issues:** https://github.com/Markerly/media-processor-microservice/issues
-- **Cloud Console:** https://console.cloud.google.com/run?project=glassy-tube
+- **Cloud Console:** https://console.cloud.google.com/run?project=glassy-tube-622
 - **Service Logs:** Available in Google Cloud Console > Cloud Run > media-processor
 
 ---

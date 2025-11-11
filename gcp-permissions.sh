@@ -3,7 +3,7 @@
 # Grant permissions to alejandro@carbonodev.com for the media processor microservice
 # Run this script to give Alejandro the necessary GCP permissions
 
-PROJECT_ID="glassy-tube"
+PROJECT_ID="glassy-tube-622"
 USER_EMAIL="alejandro@carbonodev.com"
 
 echo "Granting GCP permissions to $USER_EMAIL for project $PROJECT_ID..."
