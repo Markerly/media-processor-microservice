@@ -29,11 +29,31 @@ const router = express.Router();
 router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
     const { videoUrl, timePosition, size, quality } = req.body;
 
-    // Validation
+    // Validation: videoUrl is required
     if (!videoUrl) {
         return res.status(400).json({
             error: 'Bad Request',
             message: 'videoUrl is required'
+        });
+    }
+
+    // Validation: Must be a Google Cloud Storage URL
+    if (!videoUrl.includes('storage.googleapis.com') && !videoUrl.includes('storage.cloud.google.com')) {
+        return res.status(400).json({
+            error: 'Bad Request',
+            message: 'Only Google Cloud Storage URLs are supported'
+        });
+    }
+
+    // Validation: Must be a video file (check extension)
+    const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.m4v', '.mpeg', '.mpg'];
+    const urlLower = videoUrl.toLowerCase();
+    const hasVideoExtension = videoExtensions.some(ext => urlLower.includes(ext));
+
+    if (!hasVideoExtension) {
+        return res.status(400).json({
+            error: 'Bad Request',
+            message: 'URL must point to a valid video file (.mp4, .mov, .avi, .mkv, .webm, .flv, .m4v, .mpeg, .mpg)'
         });
     }
 
