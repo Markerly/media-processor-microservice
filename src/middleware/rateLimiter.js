@@ -14,7 +14,7 @@ const chalk = require('chalk');
  */
 const thumbnailLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 50, // Limit each IP to 50 requests per window
+    max: 100, // Limit each IP to 100 requests per window (increased to handle reports with 50+ posts)
     message: {
         error: 'Too many thumbnail requests',
         message: 'You have exceeded the rate limit. Please try again later.',
@@ -26,7 +26,7 @@ const thumbnailLimiter = rateLimit({
         console.log(chalk.yellow('[Rate Limiter] Thumbnail request blocked from IP:'), req.ip);
         res.status(429).json({
             error: 'Too many thumbnail requests',
-            message: 'You have exceeded the rate limit of 50 requests per 15 minutes. Please try again later.',
+            message: 'You have exceeded the rate limit of 100 requests per 15 minutes. Please try again later.',
             retryAfter: '15 minutes'
         });
     },
