@@ -9,6 +9,10 @@ const { generalLimiter } = require('./middleware/rateLimiter');
 const app = express();
 const PORT = process.env.PORT || 8082;
 
+// Trust proxy - required for Cloud Run/App Engine and other proxies
+// This allows express-rate-limit to correctly identify users via X-Forwarded-For
+app.set('trust proxy', true);
+
 // Configure logger
 const logger = winston.createLogger({
   level: 'info',
