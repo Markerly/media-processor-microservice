@@ -22,6 +22,7 @@ const thumbnailLimiter = rateLimit({
     },
     standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
     legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+    validate: { trustProxy: false }, // Disable trust proxy validation (internal microservice)
     handler: (req, res) => {
         console.log(chalk.yellow('[Rate Limiter] Thumbnail request blocked from IP:'), req.ip);
         res.status(429).json({
@@ -50,6 +51,7 @@ const generalLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { trustProxy: false }, // Disable trust proxy validation (internal microservice)
     handler: (req, res) => {
         console.log(chalk.yellow('[Rate Limiter] General request blocked from IP:'), req.ip);
         res.status(429).json({
@@ -78,6 +80,7 @@ const strictLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    validate: { trustProxy: false }, // Disable trust proxy validation (internal microservice)
     handler: (req, res) => {
         console.log(chalk.red('[Rate Limiter] Strict limit blocked from IP:'), req.ip);
         res.status(429).json({
