@@ -38,8 +38,10 @@ fi
 if [[ "$1 $2 $3" == 'run services get-iam-policy' ]]; then
   if [[ "${FAKE_PUBLIC_IAM:-false}" == true ]]; then
     printf '{"bindings":[{"role":"roles/run.invoker","members":["allUsers"]}]}\n'
+  elif [[ "${FAKE_MISSING_CALLER_IAM:-false}" == true ]]; then
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:media-processor-release@glassy-tube-622.iam.gserviceaccount.com"]}]}\n'
   else
-    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:platform-api@appspot.gserviceaccount.com"]}]}\n'
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:glassy-tube-622@appspot.gserviceaccount.com"]}]}\n'
   fi
   exit 0
 fi
@@ -128,6 +130,7 @@ run_release_raw() {
   FAIL_LIVE_PROBE="${FAIL_LIVE_PROBE:-false}" \
   FAKE_DRIFT_REVISION="${FAKE_DRIFT_REVISION:-false}" \
   FAKE_PUBLIC_IAM="${FAKE_PUBLIC_IAM:-false}" \
+  FAKE_MISSING_CALLER_IAM="${FAKE_MISSING_CALLER_IAM:-false}" \
     bash "$release_script" "$@"
 }
 
@@ -197,6 +200,16 @@ test ! -f "$state_dir/shifted"
 reset_state
 set +e
 FAKE_PUBLIC_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
+
+# Private is not synonymous with operational. The exact App Engine runtime
+# principal must have an unconditional invoker binding before traffic moves.
+reset_state
+set +e
+FAKE_MISSING_CALLER_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
 status=$?
 set -e
 test "$status" -ne 0

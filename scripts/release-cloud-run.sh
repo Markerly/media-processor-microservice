@@ -61,28 +61,41 @@ print(active[0])
 '
 }
 
-assert_private_iam() {
-  local policy_json public_count
+assert_invocation_iam() {
+  local policy_json
+  local expected_caller="serviceAccount:glassy-tube-622@appspot.gserviceaccount.com"
   policy_json="$(gcloud run services get-iam-policy "$service" \
     --project "$project" \
     --region "$region" \
     --format=json)"
-  public_count="$(python3 -c '
+  python3 -c '
 import json, sys
 policy = json.load(sys.stdin)
+expected_caller = sys.argv[1]
 public = {"allUsers", "allAuthenticatedUsers"}
-print(sum(
-    1
+public_members = [
+    member
     for binding in policy.get("bindings", [])
     if binding.get("role") == "roles/run.invoker"
     for member in binding.get("members", [])
     if member in public
-))
-' <<<"$policy_json")"
-  if [[ "$public_count" != 0 ]]; then
-    echo "media-processor still has $public_count public Run Invoker binding(s)" >&2
-    return 1
-  fi
+]
+caller_bindings = [
+    binding
+    for binding in policy.get("bindings", [])
+    if binding.get("role") == "roles/run.invoker"
+    and expected_caller in binding.get("members", [])
+]
+unconditional = [binding for binding in caller_bindings if not binding.get("condition")]
+assert public_members == [], f"public Run Invoker binding remains: {public_members}"
+assert len(caller_bindings) == 1, (
+    f"expected exactly one Run Invoker binding for {expected_caller}, "
+    f"got {len(caller_bindings)}"
+)
+assert len(unconditional) == 1, (
+    f"the platform caller binding for {expected_caller} must be unconditional"
+)
+' "$expected_caller" <<<"$policy_json"
 }
 
 assert_runtime_revision() {
@@ -255,7 +268,7 @@ assert len(matches) == 1, f"expected one candidate URL for {tag}, got {matches}"
 print(matches[0])
 ' "$candidate_tag" <<<"$service_json")"
 assert_runtime_revision "$candidate_revision"
-assert_private_iam
+assert_invocation_iam
 id_token="$(gcloud auth print-identity-token --audiences="$service_url")"
 
 printf 'header = "Authorization: Bearer %s"\n' "$id_token" \
@@ -279,7 +292,7 @@ live_service_json="$(gcloud run services describe "$service" \
 live_revision="$(printf '%s' "$live_service_json" | active_revision)"
 test "$live_revision" = "$candidate_revision"
 assert_runtime_revision "$live_revision"
-assert_private_iam
+assert_invocation_iam
 
 printf 'header = "Authorization: Bearer %s"\n' "$id_token" \
   | curl --config - --fail --silent --show-error --max-time 15 \
