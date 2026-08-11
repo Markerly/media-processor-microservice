@@ -56,13 +56,24 @@ service account.
 
 ## Release and rollback
 
-The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image,
-deploys it under the zero-role runtime identity, and performs an authenticated
-health request. Runtime concurrency is pinned to two on a two-vCPU instance so
-a request burst cannot fan out dozens of simultaneous FFmpeg processes inside
-one container; Cloud Run scales across the bounded instance pool instead. The
-trigger is approval-gated until this hardening release and the platform OIDC
-caller are both deployed and verified.
+The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image and
+requires `_PLATFORM_OIDC_PROOF=platform-api@<exact 40-character serving SHA>`.
+A prose ticket or mutable label cannot unlock the private cutover. The release
+deploys under the zero-role runtime identity, clears inherited secrets,
+database/VPC attachments, volumes, command/argument overrides, and probes,
+then independently re-describes the candidate and verifies its digest,
+identity, one-container shape, environment, resource ceilings, startup probe,
+and private IAM before traffic moves.
 
-Rollback by migrating Cloud Run traffic to the previous ready revision. Do not
-make the service public as a rollback mechanism.
+Runtime concurrency is pinned to two on a two-vCPU instance so a request burst
+cannot fan out dozens of simultaneous FFmpeg processes inside one container;
+Cloud Run scales across the bounded instance pool instead. The trigger is
+approval-gated until this hardening release and the platform OIDC caller are
+both deployed and verified. ID tokens are passed to curl over stdin rather
+than exposed in process arguments.
+
+If a stable-URL proof fails after traffic moves, the release migrates traffic
+back to the exact previous ready revision and re-describes the service to prove
+that revision is again at 100%. A failed or unverifiable rollback is loud and
+requires manual intervention. Do not make the service public as a rollback
+mechanism.

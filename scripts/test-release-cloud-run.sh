@@ -22,12 +22,32 @@ if [[ "$*" == 'artifacts docker images describe '* ]]; then
 fi
 
 if [[ "$1 $2 $3" == 'run services describe' ]]; then
+  active='media-old'
+  [[ -f "$FAKE_STATE_DIR/active" ]] && active="$(<"$FAKE_STATE_DIR/active")"
   if [[ -f "$FAKE_STATE_DIR/tag" ]]; then
     tag="$(<"$FAKE_STATE_DIR/tag")"
-    printf '{"status":{"url":"https://media.example","traffic":[{"revisionName":"media-old","percent":100},{"revisionName":"media-candidate","tag":"%s","url":"https://candidate.example"}]}}\n' "$tag"
+    tag_percent=''
+    [[ "$active" == media-candidate ]] && tag_percent=',"percent":100'
+    printf '{"status":{"url":"https://media.example","traffic":[{"revisionName":"%s","percent":100},{"revisionName":"media-candidate","tag":"%s"%s,"url":"https://candidate.example"}]}}\n' "$active" "$tag" "$tag_percent"
   else
-    printf '{"status":{"url":"https://media.example","traffic":[{"revisionName":"media-old","percent":100}]}}\n'
+    printf '{"status":{"url":"https://media.example","traffic":[{"revisionName":"%s","percent":100}]}}\n' "$active"
   fi
+  exit 0
+fi
+
+if [[ "$1 $2 $3" == 'run services get-iam-policy' ]]; then
+  if [[ "${FAKE_PUBLIC_IAM:-false}" == true ]]; then
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["allUsers"]}]}\n'
+  else
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:platform-api@appspot.gserviceaccount.com"]}]}\n'
+  fi
+  exit 0
+fi
+
+if [[ "$1 $2 $3" == 'run revisions describe' ]]; then
+  memory='2Gi'
+  [[ "${FAKE_DRIFT_REVISION:-false}" == true ]] && memory='1Gi'
+  printf '{"metadata":{"annotations":{"autoscaling.knative.dev/maxScale":"10","run.googleapis.com/execution-environment":"gen2"}},"status":{"imageDigest":"us-central1-docker.pkg.dev/glassy-tube-622/media-processor-repo/media-processor@sha256:%064d","conditions":[{"type":"Ready","status":"True"}]},"spec":{"serviceAccountName":"media-processor-runtime@glassy-tube-622.iam.gserviceaccount.com","containerConcurrency":2,"timeoutSeconds":300,"containers":[{"resources":{"limits":{"cpu":"2","memory":"%s"}},"ports":[{"containerPort":8080}],"env":[{"name":"NODE_ENV","value":"production"}],"startupProbe":{"httpGet":{"path":"/health","port":8080}}}],"volumes":[]}}\n' 0 "$memory"
   exit 0
 fi
 
@@ -50,9 +70,14 @@ fi
 if [[ "$1 $2 $3" == 'run services update-traffic' ]]; then
   if [[ "$*" == *'media-candidate=100'* ]]; then
     : >"$FAKE_STATE_DIR/shifted"
+    printf 'media-candidate\n' >"$FAKE_STATE_DIR/active"
   fi
   if [[ "$*" == *'media-old=100'* ]]; then
     : >"$FAKE_STATE_DIR/rolled-back"
+    printf 'media-old\n' >"$FAKE_STATE_DIR/active"
+  fi
+  if [[ "$*" == *'--remove-tags'* ]]; then
+    rm -f "$FAKE_STATE_DIR/tag"
   fi
   exit 0
 fi
@@ -68,8 +93,10 @@ write_out=false
 url=''
 for argument in "$@"; do
   [[ "$argument" == --write-out ]] && write_out=true
+  [[ "$argument" == --config ]] && read_config=true
   [[ "$argument" == http* ]] && url="$argument"
 done
+[[ "${read_config:-false}" == true ]] && cat >/dev/null
 
 if [[ "$write_out" == true ]]; then
   printf '403'
@@ -87,18 +114,25 @@ chmod +x "$fake_bin/gcloud" "$fake_bin/curl"
 
 commit_sha='1111111111111111111111111111111111111111'
 build_id='22222222-2222-2222-2222-222222222222'
+oidc_proof="platform-api@$(printf '%040d' 3)"
 
 reset_state() {
-  rm -f "$state_dir/tag" "$state_dir/shifted" "$state_dir/rolled-back" "$state_dir/gcloud.log"
+  rm -f "$state_dir/tag" "$state_dir/active" "$state_dir/shifted" "$state_dir/rolled-back" "$state_dir/gcloud.log"
   : >"$state_dir/gcloud.log"
 }
 
-run_release() {
+run_release_raw() {
   PATH="$fake_bin:$PATH" \
   FAKE_STATE_DIR="$state_dir" \
   FAKE_GCLOUD_LOG="$state_dir/gcloud.log" \
   FAIL_LIVE_PROBE="${FAIL_LIVE_PROBE:-false}" \
-    bash "$release_script" glassy-tube-622 "$commit_sha" "$build_id" "$1" "$2"
+  FAKE_DRIFT_REVISION="${FAKE_DRIFT_REVISION:-false}" \
+  FAKE_PUBLIC_IAM="${FAKE_PUBLIC_IAM:-false}" \
+    bash "$release_script" "$@"
+}
+
+run_release() {
+  run_release_raw glassy-tube-622 "$commit_sha" "$build_id" "$1" "$2"
 }
 
 # The public-to-private cutover must be impossible without explicit evidence.
@@ -110,29 +144,77 @@ set -e
 test "$status" -eq 78
 test ! -s "$state_dir/gcloud.log"
 
+# A prose receipt is not proof. The caller cutover must identify one exact
+# serving platform commit before the release can touch Cloud Run.
+reset_state
+set +e
+run_release true platform-api@reviewed-commit >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 64
+test ! -s "$state_dir/gcloud.log"
+
+# Wrong-project and non-Cloud-Build identifiers fail before any cloud lookup.
+reset_state
+set +e
+run_release_raw other-project "$commit_sha" "$build_id" true "$oidc_proof" >/dev/null 2>&1
+wrong_project_status=$?
+run_release_raw glassy-tube-622 "$commit_sha" local-build true "$oidc_proof" >/dev/null 2>&1
+wrong_build_status=$?
+set -e
+test "$wrong_project_status" -eq 64
+test "$wrong_build_status" -eq 64
+test ! -s "$state_dir/gcloud.log"
+
 # Happy path: immutable digest, private zero-traffic candidate, traffic shift,
 # live proof, and candidate-tag cleanup. No rollback should occur.
 reset_state
-run_release true platform-api@reviewed-commit >/dev/null
+run_release true "$oidc_proof" >/dev/null
 grep -q 'run deploy media-processor .*--image .*@sha256:' "$state_dir/gcloud.log"
 grep -q -- '--no-allow-unauthenticated' "$state_dir/gcloud.log"
 grep -q -- '--no-traffic' "$state_dir/gcloud.log"
 grep -q -- '--cpu 2 --concurrency 2' "$state_dir/gcloud.log"
+grep -q -- '--command= --args= --liveness-probe=' "$state_dir/gcloud.log"
+grep -q -- '--clear-secrets --clear-cloudsql-instances --clear-vpc-connector' "$state_dir/gcloud.log"
+grep -q 'run revisions describe media-candidate' "$state_dir/gcloud.log"
+grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
 grep -q 'media-candidate=100' "$state_dir/gcloud.log"
 grep -q -- '--remove-tags candidate-' "$state_dir/gcloud.log"
 test ! -f "$state_dir/rolled-back"
 
-# Adversarial path: once traffic has shifted, a failed live proof must restore
-# the exact prior revision and still remove the candidate tag.
+# A candidate that cannot prove the exact reviewed revision contract receives
+# no traffic even when its HTTP health endpoint would have answered.
 reset_state
 set +e
-FAIL_LIVE_PROBE=true run_release true platform-api@reviewed-commit >/dev/null 2>&1
+FAKE_DRIFT_REVISION=true run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
+
+# Service IAM is part of the candidate contract; application health alone
+# cannot prove the public edge closed.
+reset_state
+set +e
+FAKE_PUBLIC_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
+
+# Adversarial path: once traffic has shifted, a failed live proof must restore
+# and re-describe the exact prior revision, then remove the candidate tag.
+reset_state
+set +e
+FAIL_LIVE_PROBE=true run_release true "$oidc_proof" >/dev/null 2>&1
 status=$?
 set -e
 test "$status" -ne 0
 test -f "$state_dir/shifted"
 test -f "$state_dir/rolled-back"
+test "$(<"$state_dir/active")" = media-old
 grep -q 'media-old=100' "$state_dir/gcloud.log"
+test "$(grep -c 'run services describe media-processor' "$state_dir/gcloud.log")" -ge 4
 grep -q -- '--remove-tags candidate-' "$state_dir/gcloud.log"
 
 echo 'release state-machine tests: pass'
