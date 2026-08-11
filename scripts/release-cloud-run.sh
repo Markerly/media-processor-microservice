@@ -100,6 +100,7 @@ gcloud run deploy "$service" \
   --revision-suffix "$candidate_tag" \
   --memory 2Gi \
   --cpu 2 \
+  --concurrency 2 \
   --timeout 300 \
   --max-instances 10 \
   --set-env-vars NODE_ENV=production \

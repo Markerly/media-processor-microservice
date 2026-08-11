@@ -117,6 +117,7 @@ run_release true platform-api@reviewed-commit >/dev/null
 grep -q 'run deploy media-processor .*--image .*@sha256:' "$state_dir/gcloud.log"
 grep -q -- '--no-allow-unauthenticated' "$state_dir/gcloud.log"
 grep -q -- '--no-traffic' "$state_dir/gcloud.log"
+grep -q -- '--cpu 2 --concurrency 2' "$state_dir/gcloud.log"
 grep -q 'media-candidate=100' "$state_dir/gcloud.log"
 grep -q -- '--remove-tags candidate-' "$state_dir/gcloud.log"
 test ! -f "$state_dir/rolled-back"

@@ -58,8 +58,11 @@ service account.
 
 The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image,
 deploys it under the zero-role runtime identity, and performs an authenticated
-health request. The trigger is approval-gated until this hardening release and
-the platform OIDC caller are both deployed and verified.
+health request. Runtime concurrency is pinned to two on a two-vCPU instance so
+a request burst cannot fan out dozens of simultaneous FFmpeg processes inside
+one container; Cloud Run scales across the bounded instance pool instead. The
+trigger is approval-gated until this hardening release and the platform OIDC
+caller are both deployed and verified.
 
 Rollback by migrating Cloud Run traffic to the previous ready revision. Do not
 make the service public as a rollback mechanism.
