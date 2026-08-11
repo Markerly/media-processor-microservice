@@ -1,11 +1,11 @@
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/media-processor:$COMMIT_SHA', '.']
+    args: ['build', '--pull', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/media-processor-repo/media-processor:$COMMIT_SHA', '.']
 
-  # Push the container image to Container Registry
+  # Push the immutable image to the service-specific Artifact Registry repo
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/media-processor:$COMMIT_SHA']
+    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/media-processor-repo/media-processor:$COMMIT_SHA']
 
   # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -15,12 +15,14 @@ steps:
       - 'deploy'
       - 'media-processor'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/media-processor:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/media-processor-repo/media-processor:$COMMIT_SHA'
       - '--region'
       - 'us-central1'
       - '--platform'
       - 'managed'
-      - '--allow-unauthenticated'
+      - '--service-account'
+      - 'media-processor-runtime@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--invoker-iam-check'
       - '--memory'
       - '2Gi'
       - '--cpu'
@@ -32,5 +34,24 @@ steps:
       - '--set-env-vars'
       - 'NODE_ENV=production'
 
+  # Prove the newly deployed private revision is invokable by this exact
+  # release identity. Public access is removed only after platform-api's OIDC
+  # caller is live and independently verified.
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-ceu'
+      - |
+        SERVICE_URL="$(gcloud run services describe media-processor --project="$PROJECT_ID" --region=us-central1 --format='value(status.url)')"
+        ID_TOKEN="$(gcloud auth print-identity-token --audiences="$$SERVICE_URL")"
+        curl --fail --silent --show-error \
+          -H "Authorization: Bearer $$ID_TOKEN" \
+          "$$SERVICE_URL/health" >/dev/null
+
 images:
-  - 'gcr.io/$PROJECT_ID/media-processor:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/media-processor-repo/media-processor:$COMMIT_SHA'
+
+serviceAccount: 'projects/$PROJECT_ID/serviceAccounts/media-processor-release@$PROJECT_ID.iam.gserviceaccount.com'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

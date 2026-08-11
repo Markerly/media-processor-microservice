@@ -7,6 +7,12 @@ const fs = require('fs');
 const { generateThumbnail, cleanupThumbnail } = require('../services/thumbnailGenerator');
 const { thumbnailLimiter } = require('../middleware/rateLimiter');
 const chalk = require('chalk');
+const {
+    VideoUrlValidationError,
+    normalizedThumbnailOptions,
+    validatedVideoUrl,
+    videoUrlForLog,
+} = require('../lib/videoUrlPolicy');
 
 const router = express.Router();
 
@@ -27,47 +33,36 @@ const router = express.Router();
  * Rate limit: 50 requests per 15 minutes per IP
  */
 router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
-    const { videoUrl, timePosition, size, quality } = req.body;
+    const { videoUrl: presentedVideoUrl, timePosition, size, quality } = req.body || {};
 
     // Validation: videoUrl is required
-    if (!videoUrl) {
+    if (!presentedVideoUrl) {
         return res.status(400).json({
             error: 'Bad Request',
             message: 'videoUrl is required'
         });
     }
 
-    // Validation: Must be a Google Cloud Storage URL
-    if (!videoUrl.includes('storage.googleapis.com') && !videoUrl.includes('storage.cloud.google.com')) {
+    let videoUrl;
+    let options;
+    try {
+        videoUrl = validatedVideoUrl(presentedVideoUrl);
+        options = normalizedThumbnailOptions({ timePosition, size, quality });
+    } catch (error) {
+        if (!(error instanceof VideoUrlValidationError)) throw error;
         return res.status(400).json({
             error: 'Bad Request',
-            message: 'Only Google Cloud Storage URLs are supported'
-        });
-    }
-
-    // Validation: Must be a video file (check extension)
-    const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.m4v', '.mpeg', '.mpg'];
-    const urlLower = videoUrl.toLowerCase();
-    const hasVideoExtension = videoExtensions.some(ext => urlLower.includes(ext));
-
-    if (!hasVideoExtension) {
-        return res.status(400).json({
-            error: 'Bad Request',
-            message: 'URL must point to a valid video file (.mp4, .mov, .avi, .mkv, .webm, .flv, .m4v, .mpeg, .mpg)'
+            message: 'The video URL or thumbnail options are invalid'
         });
     }
 
     let thumbnailPath = null;
 
     try {
-        console.log(chalk.cyan('[Thumbnail Route] Request received for video:'), videoUrl);
+        console.log(chalk.cyan('[Thumbnail Route] Request received for video:'), videoUrlForLog(videoUrl));
 
         // Generate thumbnail
-        thumbnailPath = await generateThumbnail(videoUrl, {
-            timePosition,
-            size,
-            quality
-        });
+        thumbnailPath = await generateThumbnail(videoUrl, options);
 
         // Check if file exists and has content
         const stats = fs.statSync(thumbnailPath);
@@ -80,32 +75,36 @@ router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
         // Send file as response
         res.sendFile(thumbnailPath, (err) => {
             if (err) {
-                console.error(chalk.red('[Thumbnail Route] ✗ Error sending file:'), err);
+                console.error(chalk.red('[Thumbnail Route] ✗ Error sending file'), {
+                    errorType: err?.name || 'Error'
+                });
                 if (!res.headersSent) {
                     res.status(500).json({
                         error: 'Failed to send thumbnail',
-                        message: err.message
+                        message: 'Unable to return the generated thumbnail'
                     });
                 }
             }
 
             // Cleanup after sending (or on error)
             if (thumbnailPath) {
-                cleanupThumbnail(thumbnailPath).catch(console.error);
+                cleanupThumbnail(thumbnailPath).catch(() => {});
             }
         });
 
     } catch (error) {
-        console.error(chalk.red('[Thumbnail Route] ✗ Error:'), error);
+        console.error(chalk.red('[Thumbnail Route] ✗ Processing failed'), {
+            errorType: error?.name || 'Error'
+        });
 
         // Cleanup on error
         if (thumbnailPath) {
-            cleanupThumbnail(thumbnailPath).catch(console.error);
+            cleanupThumbnail(thumbnailPath).catch(() => {});
         }
 
         res.status(500).json({
             error: 'Thumbnail generation failed',
-            message: error.message
+            message: 'The thumbnail could not be generated'
         });
     }
 });

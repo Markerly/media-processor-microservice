@@ -1,0 +1,54 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: media-processor-verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Tests, lint, and dependency audit
+        run: |
+          npm ci
+          npm test -- --runInBand
+          npm run lint
+          npm audit --audit-level=moderate
+
+      - name: Build and boot the production image
+        run: |
+          set -euo pipefail
+          docker build --pull -t media-processor:verify .
+          docker run -d --name media-processor-verify -p 127.0.0.1:8080:8080 media-processor:verify
+          trap 'docker rm -f media-processor-verify >/dev/null 2>&1 || true' EXIT
+
+          code=000
+          for _ in $(seq 1 20); do
+            code="$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/health || true)"
+            [ "$code" = 200 ] && break
+            sleep 1
+          done
+          test "$code" = 200
+          test "$(docker inspect media-processor-verify --format '{{.Config.User}}')" = node
+
+          oversized_code="$(node -e 'process.stdout.write(JSON.stringify({videoUrl:"x".repeat(20000)}))' | \
+            curl --silent --output /dev/null --write-out '%{http_code}' \
+              -H 'content-type: application/json' --data-binary @- \
+              http://127.0.0.1:8080/generate-thumbnail)"
+          test "$oversized_code" = 413

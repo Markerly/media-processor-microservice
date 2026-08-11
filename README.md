@@ -1,144 +1,65 @@
-# Media Processor Microservice
+# Media processor
 
-FFmpeg processing microservice for Cloud Run deployment on the glassy-tube project.
+Private Cloud Run service that generates a JPEG thumbnail from an HTTPS Google
+Cloud Storage video object.
 
-## Overview
+## HTTP contract
 
-This microservice handles media processing tasks that can't be performed on App Engine due to FFmpeg requirements. It's designed to run on Google Cloud Run with automatic scaling.
+- `GET /health`
+- `POST /generate-thumbnail`
 
-## Quick Start
+The thumbnail request body contains `videoUrl` and optional bounded
+`timePosition`, `size`, and `quality` fields. Input URLs must use an exact
+Google Storage HTTPS hostname and a supported video extension. Redirect-capable
+generic URLs, metadata hosts, hostname lookalikes, URL userinfo, and nonstandard
+ports are rejected before FFmpeg starts.
 
-### Prerequisites
+The service never logs signed query credentials or object paths. FFmpeg runs as
+the non-root `node` user, receives an argument array rather than a shell command,
+has a restricted network protocol allowlist, and is killed on a bounded timeout.
 
-- Node.js 18+
-- Google Cloud SDK (`gcloud`)
-- GitHub CLI (`gh`)
-- Docker (for local testing)
+## Local verification
 
-### Local Development
-
-```bash
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
-
-# Test the service
-curl http://localhost:8080/health
+```sh
+npm ci
+npm test -- --runInBand
+npm run lint
+npm audit --audit-level=moderate
+docker build -t media-processor:local .
+docker run --rm -p 8080:8080 media-processor:local
 ```
 
-### Google Cloud Setup
+Example request:
 
-1. Run the setup script:
-   ```bash
-   ./setup-gcp.sh
-   ```
-
-2. Connect GitHub repository to Cloud Build:
-   - Go to [Cloud Build Triggers](https://console.cloud.google.com/cloud-build/triggers)
-   - Click "Connect Repository"
-   - Select GitHub and this repository
-   - Create a trigger for the `main` branch
-
-3. Push code to deploy:
-   ```bash
-   git add .
-   git commit -m "Initial deployment"
-   git push origin main
-   ```
-
-## Project Structure
-
-```
-├── src/
-│   └── index.js          # Main application entry point
-├── Dockerfile            # Container configuration
-├── cloudbuild.yaml       # Cloud Build deployment config
-├── setup-gcp.sh          # Google Cloud setup script
-└── package.json          # Node.js dependencies
+```sh
+curl --fail --output thumbnail.jpg \
+  -H 'content-type: application/json' \
+  --data '{"videoUrl":"https://storage.googleapis.com/bucket/video.mp4"}' \
+  http://127.0.0.1:8080/generate-thumbnail
 ```
 
-## Development Tasks
+## Production identity boundary
 
-### TODO: Implement FFmpeg Processing Routes
+Cloud Run is intended to be private. The platform App Engine service account is
+the application caller and sends a Google-signed ID token whose audience is the
+exact Cloud Run service origin.
 
-The basic service structure is complete. Next steps for development:
+Cloud Build uses the service-specific `media-processor-release` identity. It
+can write only to the service Artifact Registry repository, update only this
+Cloud Run service, act as only `media-processor-runtime`, write build logs, and
+invoke this service for its post-deploy health proof. The runtime identity has
+zero project roles.
 
-1. **Create processing routes** (`src/routes/process.js`):
-   - Video conversion endpoints
-   - Audio extraction
-   - Image processing
-   - File format validation
+Do not add `--allow-unauthenticated`, grant project-wide Editor/Owner, restore
+the deleted workstation IAM scripts, or deploy with the default Compute Engine
+service account.
 
-2. **Add file upload handling**:
-   - Multipart form data processing
-   - Temporary file management
-   - Cloud Storage integration
+## Release and rollback
 
-3. **Implement FFmpeg operations**:
-   - Video transcoding
-   - Audio conversion
-   - Thumbnail generation
-   - Metadata extraction
+The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image,
+deploys it under the zero-role runtime identity, and performs an authenticated
+health request. The trigger is approval-gated until this hardening release and
+the platform OIDC caller are both deployed and verified.
 
-4. **Error handling and logging**:
-   - Detailed error responses
-   - Processing progress tracking
-   - Performance monitoring
-
-5. **Security and validation**:
-   - File type restrictions
-   - Size limits
-   - Input sanitization
-
-### Example Usage (After Implementation)
-
-```bash
-# Convert video to different format
-curl -X POST http://localhost:8080/process/convert \
-  -F "file=@input.mp4" \
-  -F "format=webm" \
-  -F "quality=720p"
-
-# Extract audio from video
-curl -X POST http://localhost:8080/process/extract-audio \
-  -F "file=@video.mp4" \
-  -F "format=mp3"
-```
-
-## Deployment
-
-The service automatically deploys to Cloud Run when code is pushed to the `main` branch. The deployment includes:
-
-- 2GB memory allocation
-- 2 CPU cores
-- 300-second timeout
-- Auto-scaling up to 10 instances
-
-## Service Configuration
-
-- **Port**: 8080 (configurable via PORT env var)
-- **Health check**: `/health` endpoint
-- **Memory**: 2GB
-- **CPU**: 2 cores
-- **Timeout**: 5 minutes
-- **Region**: us-central1
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | Service port | 8080 |
-| `NODE_ENV` | Environment | development |
-
-## Contributing
-
-1. Create a feature branch
-2. Implement changes with tests
-3. Submit a pull request
-4. Automatic deployment on merge to main
-
-## License
-
-MIT
+Rollback by migrating Cloud Run traffic to the previous ready revision. Do not
+make the service public as a rollback mechanism.

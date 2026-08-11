@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 
 # Install FFmpeg
 RUN apk add --no-cache ffmpeg
@@ -9,13 +9,15 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
 # Copy source code
 COPY src/ ./src/
 
 # Create uploads directory
-RUN mkdir -p uploads
+RUN mkdir -p uploads && chown node:node uploads
+
+USER node
 
 # Expose port
 EXPOSE 8080
