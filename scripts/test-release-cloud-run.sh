@@ -100,6 +100,16 @@ for argument in "$@"; do
 done
 [[ "${read_config:-false}" == true ]] && cat >/dev/null
 
+if [[ "$url" == 'https://markerly-dot-platform-api-dot-glassy-tube-622.appspot.com/versionz' ]]; then
+  [[ "${FAKE_PLATFORM_UNAVAILABLE:-false}" == true ]] && exit 22
+  if [[ "${FAKE_PLATFORM_MALFORMED:-false}" == true ]]; then
+    printf 'not-json\n'
+  else
+    printf '{"ok":true,"commit":"%s","gae_service":"platform-api","gae_version":"production"}\n' "$FAKE_PLATFORM_COMMIT"
+  fi
+  exit 0
+fi
+
 if [[ "$write_out" == true ]]; then
   printf '403'
   exit 0
@@ -117,6 +127,7 @@ chmod +x "$fake_bin/gcloud" "$fake_bin/curl"
 commit_sha='1111111111111111111111111111111111111111'
 build_id='22222222-2222-2222-2222-222222222222'
 oidc_proof="platform-api@$(printf '%040d' 3)"
+platform_commit="${oidc_proof#platform-api@}"
 
 reset_state() {
   rm -f "$state_dir/tag" "$state_dir/active" "$state_dir/shifted" "$state_dir/rolled-back" "$state_dir/gcloud.log"
@@ -131,6 +142,9 @@ run_release_raw() {
   FAKE_DRIFT_REVISION="${FAKE_DRIFT_REVISION:-false}" \
   FAKE_PUBLIC_IAM="${FAKE_PUBLIC_IAM:-false}" \
   FAKE_MISSING_CALLER_IAM="${FAKE_MISSING_CALLER_IAM:-false}" \
+  FAKE_PLATFORM_COMMIT="${FAKE_PLATFORM_COMMIT:-$platform_commit}" \
+  FAKE_PLATFORM_MALFORMED="${FAKE_PLATFORM_MALFORMED:-false}" \
+  FAKE_PLATFORM_UNAVAILABLE="${FAKE_PLATFORM_UNAVAILABLE:-false}" \
     bash "$release_script" "$@"
 }
 
@@ -168,6 +182,23 @@ set -e
 test "$wrong_project_status" -eq 64
 test "$wrong_build_status" -eq 64
 test ! -s "$state_dir/gcloud.log"
+
+# A 40-hex receipt must match the commit the production caller attests through
+# /versionz. Stale, malformed, and unavailable evidence all fail before the
+# first gcloud read or mutation.
+for proof_case in stale malformed unavailable; do
+  reset_state
+  set +e
+  case "$proof_case" in
+    stale) FAKE_PLATFORM_COMMIT="$(printf '%040d' 4)" run_release true "$oidc_proof" >/dev/null 2>&1 ;;
+    malformed) FAKE_PLATFORM_MALFORMED=true run_release true "$oidc_proof" >/dev/null 2>&1 ;;
+    unavailable) FAKE_PLATFORM_UNAVAILABLE=true run_release true "$oidc_proof" >/dev/null 2>&1 ;;
+  esac
+  proof_status=$?
+  set -e
+  test "$proof_status" -eq 78
+  test ! -s "$state_dir/gcloud.log"
+done
 
 # Happy path: immutable digest, private zero-traffic candidate, traffic shift,
 # live proof, and candidate-tag cleanup. No rollback should occur.

@@ -34,6 +34,36 @@ if [[ ! "$oidc_proof" =~ ^platform-api@[a-f0-9]{40}$ ]]; then
   exit 64
 fi
 
+# A syntactically plausible SHA is not evidence. Resolve the public production
+# attestation before the first Cloud Run/Artifact Registry mutation and require
+# the exact reviewed caller commit to be serving. This closes the gap where an
+# operator could unlock the private cutover with a stale or invented 40-hex
+# value while platform-api still lacked the ID-token caller.
+platform_commit="${oidc_proof#platform-api@}"
+platform_version_url='https://markerly-dot-platform-api-dot-glassy-tube-622.appspot.com/versionz'
+if ! platform_version_json="$(curl --fail --silent --show-error --max-time 15 "$platform_version_url")"; then
+  echo "private cutover blocked: platform-api /versionz is unreachable" >&2
+  exit 78
+fi
+if ! python3 -c '
+import json, re, sys
+try:
+    version = json.load(sys.stdin)
+    expected = sys.argv[1]
+    assert isinstance(version, dict)
+    assert version.get("ok") is True
+    assert version.get("gae_service") == "platform-api"
+    assert version.get("gae_version") == "production"
+    assert re.fullmatch(r"[a-f0-9]{40}", str(version.get("commit", "")))
+    assert version.get("commit") == expected
+except Exception as error:
+    print(f"platform-api serving-commit proof failed: {type(error).__name__}", file=sys.stderr)
+    raise SystemExit(1)
+' "$platform_commit" <<<"$platform_version_json"; then
+  echo "private cutover blocked: reviewed platform-api commit is not serving" >&2
+  exit 78
+fi
+
 service='media-processor'
 region='us-central1'
 runtime_service_account="media-processor-runtime@$project.iam.gserviceaccount.com"

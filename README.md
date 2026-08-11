@@ -58,7 +58,10 @@ service account.
 
 The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image and
 requires `_PLATFORM_OIDC_PROOF=platform-api@<exact 40-character serving SHA>`.
-A prose ticket or mutable label cannot unlock the private cutover. The release
+A prose ticket, mutable label, stale SHA, or invented SHA cannot unlock the
+private cutover: before its first gcloud lookup, the release requires the exact
+commit in that proof to match production platform-api's `/versionz` attestation.
+The release
 deploys under the zero-role runtime identity, clears inherited secrets,
 database/VPC attachments, volumes, command/argument overrides, and probes,
 then independently re-describes the candidate and verifies its digest,

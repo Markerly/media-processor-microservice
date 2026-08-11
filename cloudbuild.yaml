@@ -55,7 +55,8 @@ substitutions:
   # Fail closed until a reviewed platform-api OIDC caller is deployed and a
   # real thumbnail request has been captured. The approval-gated release must
   # override both values. The proof is exact: platform-api@<40-char serving
-  # Git SHA>, leaving the immutable caller revision in the build record.
+  # Git SHA>; release-cloud-run.sh matches it against production /versionz
+  # before the first gcloud lookup, then leaves it in the build record.
   _PLATFORM_OIDC_READY: 'false'
   _PLATFORM_OIDC_PROOF: 'UNSET'
 
