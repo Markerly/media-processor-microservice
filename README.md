@@ -136,9 +136,11 @@ is the second. Cloud Run's implicit accepted audience is "the" `*.run.app`
 URL — which of the two is not a contract we should guess at the moment the
 public edge closes. The release then proves `/health` twice on the private
 candidate: once with a token minted for `status.url`, and once with a token
-minted for the platform origin. (We cannot mint as the App Engine SA —
-`getOpenIdToken` is self-only on that identity — but audience is a property
-of the token, not the principal.) It independently re-describes the
+minted for the platform origin. Tokens are minted from the Cloud Build
+metadata server (`…/identity?audience=`), because a user-managed Cloud Build
+SA cannot satisfy `gcloud auth print-identity-token`. (We also cannot mint
+as the App Engine SA — `getOpenIdToken` is self-only on that identity —
+but audience is a property of the token, not the principal.) It independently re-describes the
 candidate and verifies its digest, identity, one-container shape,
 environment, resource ceilings, startup probe, private IAM, and the
 audience pin before traffic moves.
