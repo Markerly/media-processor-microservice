@@ -52,16 +52,24 @@ Cloud Run service, act as only `media-processor-runtime`, write build logs, and
 invoke this service for its post-deploy health proof. The runtime identity has
 zero project roles.
 
-Scope of the IAM assertion, stated plainly: the release reads the *service*-level
-IAM policy and proves no public binding and no unexpected service-level invoker
-exists. `roles/run.invoker` granted at project or folder level is invisible to
-it — and the release identity is expected to hold exactly such a grant, because
-the service-level policy is asserted to contain the platform caller and nothing
-else. Reading the project policy would require `resourcemanager.projects.getIamPolicy`
+Two principals may hold `roles/run.invoker` on this service, and the release
+asserts exactly that pair: the platform App Engine caller (the application) and
+`media-processor-release` (which must invoke to run its own post-deploy health
+proof, since that proof presents its token). Both must be unconditional. A
+conditional binding on the release identity would 403 its own proof; anyone else
+fails the release.
+
+Granting the release identity that binding at *service* scope is the deliberate
+narrow choice. The alternative — project-level `roles/run.invoker` — would confer
+invoke on every Cloud Run service in the project.
+
+Scope of the assertion, stated plainly: it reads the *service*-level policy only,
+so `roles/run.invoker` granted at project or folder level is invisible to it.
+Reading the project policy would require `resourcemanager.projects.getIamPolicy`
 on the release identity, widening it past the least privilege this release
 establishes. What proves the public edge is closed is the anonymous 403 probe
 against the live URL, not the policy read. Audit project-level invoker grants
-separately.
+separately; `scripts/preflight-release.sh` reports them when it can.
 
 Optionally set `ALLOWED_VIDEO_BUCKETS` (comma-separated) on the service to
 narrow the GCS host policy to specific buckets. It is the only environment

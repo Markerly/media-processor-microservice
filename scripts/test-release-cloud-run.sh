@@ -44,8 +44,13 @@ if [[ "$1 $2 $3" == 'run services get-iam-policy' ]]; then
     printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:media-processor-release@glassy-tube-622.iam.gserviceaccount.com"]}]}\n'
   elif [[ "${FAKE_EXTRA_INVOKER_IAM:-false}" == true ]]; then
     printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:glassy-tube-622@appspot.gserviceaccount.com","user:attacker@example.com"]}]}\n'
+  elif [[ "${FAKE_CONDITIONAL_RELEASE_IAM:-false}" == true ]]; then
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:glassy-tube-622@appspot.gserviceaccount.com"]},{"role":"roles/run.invoker","members":["serviceAccount:media-processor-release@glassy-tube-622.iam.gserviceaccount.com"],"condition":{"title":"t","expression":"false"}}]}\n'
   else
-    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:glassy-tube-622@appspot.gserviceaccount.com"]}]}\n'
+    # The real shape on glassy-tube-622 once --no-allow-unauthenticated strips
+    # allUsers: the platform caller AND the release identity, which needs invoke
+    # to run its own authenticated health proof.
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:glassy-tube-622@appspot.gserviceaccount.com","serviceAccount:media-processor-release@glassy-tube-622.iam.gserviceaccount.com"]}]}\n'
   fi
   exit 0
 fi
@@ -157,6 +162,7 @@ run_release_raw() {
   FAKE_PUBLIC_IAM="${FAKE_PUBLIC_IAM:-false}" \
   FAKE_MISSING_CALLER_IAM="${FAKE_MISSING_CALLER_IAM:-false}" \
   FAKE_EXTRA_INVOKER_IAM="${FAKE_EXTRA_INVOKER_IAM:-false}" \
+  FAKE_CONDITIONAL_RELEASE_IAM="${FAKE_CONDITIONAL_RELEASE_IAM:-false}" \
   FAKE_DIRECT_VPC="${FAKE_DIRECT_VPC:-false}" \
   FAKE_PLATFORM_COMMIT="${FAKE_PLATFORM_COMMIT:-$platform_commit}" \
   FAKE_PLATFORM_MALFORMED="${FAKE_PLATFORM_MALFORMED:-false}" \
@@ -273,10 +279,23 @@ grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
 # case from tripping errexit inside the substitution.
 test "$(grep -c 'run deploy media-processor' "$state_dir/gcloud.log" || true)" -eq 0
 
-# Extra invokers are not equivalent to the reviewed platform caller.
+# Extra invokers are not equivalent to the reviewed platform caller. The default
+# fake policy already carries the release identity alongside the caller, so the
+# happy path above proves that pair is ACCEPTED; this proves a third principal is
+# still rejected, i.e. the allowance is a named pair and not a blanket relaxation.
 reset_state
 set +e
 FAKE_EXTRA_INVOKER_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
+
+# The release identity may hold invoker at service scope, but not conditionally:
+# a condition it does not satisfy would 403 its own post-deploy health proof.
+reset_state
+set +e
+FAKE_CONDITIONAL_RELEASE_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
 status=$?
 set -e
 test "$status" -ne 0

@@ -126,20 +126,26 @@ else:
     print("  FAIL     platform caller has NO unconditional run.invoker: " + caller)
     ok = False
 
-extra = sorted(set(members) - {caller} - set(public))
+extra = sorted(set(members) - {caller, release} - set(public))
 if extra:
     print("  FAIL     unexpected service-level invoker(s); release will refuse: "
           + ", ".join(extra))
     ok = False
 else:
-    print("  PASS     no unexpected service-level invoker")
+    print("  PASS     no service-level invoker beyond the platform caller and release identity")
 
-# Advisory: the release identity is expected to hold invoker at PROJECT level,
-# which a service-policy read cannot see (INV-43 / README scope note).
+# The release identity must be able to invoke, because the post-deploy health
+# proof presents ITS token. A service-level binding is the narrow way to grant
+# that; project-level (check 4) also works but confers invoke project-wide.
 if release in members:
-    print("  FAIL     " + release + " holds a SERVICE-level invoker binding; the release "
-          "asserts the platform caller is the only one, so this will abort")
-    ok = False
+    if release in unconditional:
+        print("  PASS     release identity can run its own health proof (service-level invoker)")
+    else:
+        print("  FAIL     release identity has only a conditional invoker binding; its health proof would 403")
+        ok = False
+else:
+    print("  note     release identity is not a service-level invoker; it must hold "
+          "project-level instead - see check 4")
 
 sys.exit(0 if ok else 1)
 ' "$policy" "$platform_caller" "$release_sa"; then
@@ -152,20 +158,41 @@ else
 fi
 
 echo
-echo "4. Release identity can run its own authenticated health proof"
-# Project-level, because the service-level policy is asserted to hold the
-# platform caller and nothing else. Without this the post-deploy 200 proof 403s.
+echo "4. Project-level invoker (only needed if check 3 found no service-level binding)"
+# Reported either way, because a project-level grant confers invoke on EVERY
+# Cloud Run service in the project. It satisfies the release, and it is also
+# worth seeing when a narrower service-level binding already covers the need.
+release_service_level=false
+if [[ -n "${policy:-}" ]] && python3 -c '
+import json, sys
+try:
+    policy = json.loads(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+members = {m for b in policy.get("bindings", []) if b.get("role") == "roles/run.invoker"
+           for m in b.get("members", [])}
+raise SystemExit(0 if sys.argv[2] in members else 1)
+' "$policy" "serviceAccount:$release_sa" 2>/dev/null; then
+  release_service_level=true
+fi
+
 if project_invokers="$(gcloud projects get-iam-policy "$project" \
      --flatten='bindings[].members' \
      --filter='bindings.role=roles/run.invoker' \
      --format='value(bindings.members)' 2>/dev/null)"; then
   if grep -qxF "serviceAccount:$release_sa" <<<"$project_invokers"; then
-    pass "$release_sa holds project-level roles/run.invoker"
+    note "$release_sa also holds PROJECT-level roles/run.invoker (invoke on every Cloud Run service)"
+  elif [[ "$release_service_level" == true ]]; then
+    pass "not needed: the service-level binding in check 3 already covers the health proof"
   else
-    fail "$release_sa has no project-level roles/run.invoker; the authenticated /health proof will 403"
+    fail "$release_sa has neither a service-level nor a project-level roles/run.invoker; the authenticated /health proof will 403"
   fi
 else
-  unknown "cannot read the project IAM policy (needs resourcemanager.projects.getIamPolicy)"
+  if [[ "$release_service_level" == true ]]; then
+    note "cannot read the project IAM policy, but the service-level binding already covers the health proof"
+  else
+    unknown "cannot read the project IAM policy (needs resourcemanager.projects.getIamPolicy)"
+  fi
 fi
 
 echo

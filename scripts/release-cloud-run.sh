@@ -73,6 +73,7 @@ service='media-processor'
 region='us-central1'
 platform_caller='serviceAccount:glassy-tube-622@appspot.gserviceaccount.com'
 runtime_service_account="media-processor-runtime@$project.iam.gserviceaccount.com"
+release_service_account="media-processor-release@$project.iam.gserviceaccount.com"
 image="us-central1-docker.pkg.dev/$project/media-processor-repo/media-processor:$commit_sha"
 digest="$(gcloud artifacts docker images describe "$image" \
   --project "$project" \
@@ -99,16 +100,23 @@ print(active[0])
 
 # Scope note, deliberately explicit: this reads the SERVICE-level IAM policy
 # only. `roles/run.invoker` granted at the project or folder level does not
-# appear here and is not checked, and the release identity itself is expected to
-# hold exactly such a grant so it can run the authenticated health proof below.
-# So the guarantee this function actually provides is "no public binding and no
-# unexpected service-level invoker" — not "only the platform caller can invoke".
-# Anything stronger needs resourcemanager.projects.getIamPolicy, which would
-# widen the release identity past the least privilege this release exists to
-# establish. The anonymous 403 probes are what prove the public edge is closed.
+# appear here and is not checked. So the guarantee this function provides is "no
+# public binding, and no service-level invoker beyond the two this design names"
+# — not "only these two principals can invoke". Anything stronger needs
+# resourcemanager.projects.getIamPolicy, which would widen the release identity
+# past the least privilege this release exists to establish. The anonymous 403
+# probes are what prove the public edge is closed.
+#
+# The two named principals are the platform caller (the application) and the
+# release identity (which must invoke to run its own post-deploy health proof).
+# An earlier revision asserted the caller was the ONLY service-level invoker.
+# Live policy on glassy-tube-622 shows the release identity holding exactly such
+# a binding, so that assertion would have aborted every release — and aborted it
+# AFTER the candidate deploy had already closed the public edge service-wide.
 assert_invocation_iam() {
   local policy_json
   local expected_caller="$platform_caller"
+  local release_identity="serviceAccount:$release_service_account"
   policy_json="$(gcloud run services get-iam-policy "$service" \
     --project "$project" \
     --region "$region" \
@@ -116,7 +124,7 @@ assert_invocation_iam() {
   python3 -c '
 import json, sys
 policy = json.load(sys.stdin)
-expected_caller = sys.argv[1]
+expected_caller, release_identity = sys.argv[1:3]
 public = {"allUsers", "allAuthenticatedUsers"}
 invoker_bindings = [
     binding
@@ -128,17 +136,35 @@ invoker_members = [
     for binding in invoker_bindings
     for member in binding.get("members", [])
 ]
-public_members = [member for member in invoker_members if member in public]
-unconditional = [binding for binding in invoker_bindings if not binding.get("condition")]
-assert public_members == [], f"public Run Invoker binding remains: {public_members}"
-assert set(invoker_members) == {expected_caller}, (
-    f"Run Invoker members must be exactly [{expected_caller}], got {invoker_members}"
+unconditional_members = [
+    member
+    for binding in invoker_bindings
+    if not binding.get("condition")
+    for member in binding.get("members", [])
+]
+
+public_members = sorted(member for member in invoker_members if member in public)
+assert not public_members, f"public Run Invoker binding remains: {public_members}"
+
+# The release identity belongs here, and is permitted rather than merely
+# tolerated: the authenticated /health proof further down presents ITS token, so
+# a policy that excludes it leaves this release structurally unable to prove the
+# boundary it just established. Holding that grant at SERVICE scope is the
+# narrow choice -- the alternative, project-level roles/run.invoker, would
+# confer invoke on every Cloud Run service in the project.
+unexpected = sorted(set(invoker_members) - {expected_caller, release_identity})
+assert not unexpected, f"unexpected Run Invoker members: {unexpected}"
+
+assert expected_caller in unconditional_members, (
+    f"the platform caller {expected_caller} needs an unconditional service-level "
+    f"invoker binding; got {invoker_members}"
 )
-assert len(invoker_bindings) == 1 and len(unconditional) == 1, (
-    f"the platform caller binding for {expected_caller} must be the only unconditional "
-    f"service-level invoker (project-level grants are out of scope here)"
-)
-' "$expected_caller" <<<"$policy_json"
+if release_identity in invoker_members:
+    assert release_identity in unconditional_members, (
+        f"{release_identity} holds only a conditional invoker binding, so the "
+        f"authenticated health proof below would 403"
+    )
+' "$expected_caller" "$release_identity" <<<"$policy_json"
 }
 
 # Pre-flight, and the ordering here is the whole point.
