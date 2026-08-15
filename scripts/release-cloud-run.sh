@@ -36,7 +36,12 @@ fi
 
 # Refuse Cloud Run mutations unless production /versionz commit equals the proof SHA.
 platform_commit="${oidc_proof#platform-api@}"
-platform_version_url='https://markerly-dot-platform-api-dot-glassy-tube-622.appspot.com/versionz'
+# Bare service host, not a tenant slug. /versionz is mounted ahead of platform-api's
+# tenant resolution, so both spellings answer identically today — but the tenant
+# form additionally depends on App Engine soft-routing an unknown version name to
+# the default one. platform-api's own stale-deploy guard pins the bare host for
+# exactly this reason; matching it keeps this gate independent of which tenants exist.
+platform_version_url='https://platform-api-dot-glassy-tube-622.appspot.com/versionz'
 if ! platform_version_json="$(curl --fail --silent --show-error --proto '=https' --max-time 15 --max-filesize 16384 "$platform_version_url")"; then
   echo "private cutover blocked: platform-api /versionz is unreachable" >&2
   exit 78
@@ -66,6 +71,7 @@ fi
 
 service='media-processor'
 region='us-central1'
+platform_caller='serviceAccount:glassy-tube-622@appspot.gserviceaccount.com'
 runtime_service_account="media-processor-runtime@$project.iam.gserviceaccount.com"
 image="us-central1-docker.pkg.dev/$project/media-processor-repo/media-processor:$commit_sha"
 digest="$(gcloud artifacts docker images describe "$image" \
@@ -91,9 +97,18 @@ print(active[0])
 '
 }
 
+# Scope note, deliberately explicit: this reads the SERVICE-level IAM policy
+# only. `roles/run.invoker` granted at the project or folder level does not
+# appear here and is not checked, and the release identity itself is expected to
+# hold exactly such a grant so it can run the authenticated health proof below.
+# So the guarantee this function actually provides is "no public binding and no
+# unexpected service-level invoker" — not "only the platform caller can invoke".
+# Anything stronger needs resourcemanager.projects.getIamPolicy, which would
+# widen the release identity past the least privilege this release exists to
+# establish. The anonymous 403 probes are what prove the public edge is closed.
 assert_invocation_iam() {
   local policy_json
-  local expected_caller="serviceAccount:glassy-tube-622@appspot.gserviceaccount.com"
+  local expected_caller="$platform_caller"
   policy_json="$(gcloud run services get-iam-policy "$service" \
     --project "$project" \
     --region "$region" \
@@ -120,9 +135,48 @@ assert set(invoker_members) == {expected_caller}, (
     f"Run Invoker members must be exactly [{expected_caller}], got {invoker_members}"
 )
 assert len(invoker_bindings) == 1 and len(unconditional) == 1, (
-    f"the platform caller binding for {expected_caller} must be the only unconditional invoker"
+    f"the platform caller binding for {expected_caller} must be the only unconditional "
+    f"service-level invoker (project-level grants are out of scope here)"
 )
 ' "$expected_caller" <<<"$policy_json"
+}
+
+# Pre-flight, and the ordering here is the whole point.
+#
+# `--no-allow-unauthenticated` on the candidate deploy below is SERVICE-scoped
+# and takes effect when the deploy lands — not when traffic shifts. The public
+# edge therefore closes for the revision that is *currently serving 100%*, while
+# the candidate still holds zero traffic. `--no-traffic` isolates the new code;
+# it does not isolate the authorization change.
+#
+# That makes the platform caller's invoker binding a precondition, not a
+# post-condition. If it is missing at deploy time the caller starts receiving 403
+# immediately, and this release deliberately has no public-access rollback (see
+# README) — so the automated recovery path cannot undo it. Prove the caller can
+# get in while the door is still open, and refuse the cutover otherwise.
+assert_platform_caller_present() {
+  local policy_json
+  policy_json="$(gcloud run services get-iam-policy "$service" \
+    --project "$project" \
+    --region "$region" \
+    --format=json)"
+  python3 -c '
+import json, sys
+policy = json.load(sys.stdin)
+expected_caller = sys.argv[1]
+granted = [
+    binding
+    for binding in policy.get("bindings", [])
+    if binding.get("role") == "roles/run.invoker"
+    and expected_caller in binding.get("members", [])
+    and not binding.get("condition")
+]
+assert granted, (
+    f"refusing to close the public edge: {expected_caller} holds no unconditional "
+    f"roles/run.invoker binding on this service. Closing it now would 403 the "
+    f"platform caller immediately, and rollback cannot restore public access."
+)
+' "$platform_caller" <<<"$policy_json"
 }
 
 assert_runtime_revision() {
@@ -172,8 +226,18 @@ startup = container.get("startupProbe", {}).get("httpGet", {})
 require(startup.get("path") == "/health", "startup probe path drift")
 require(startup.get("port") == 8080, "startup probe port drift")
 
-env = container.get("env", [])
-require(env == [{"name": "NODE_ENV", "value": "production"}], "environment drift")
+env_items = container.get("env", [])
+env = {item.get("name"): item.get("value") for item in env_items}
+require(len(env) == len(env_items), "duplicate environment variable")
+require(env.get("NODE_ENV") == "production", "NODE_ENV drift")
+# ALLOWED_VIDEO_BUCKETS is the documented narrowing of the GCS host policy
+# (README, DEVELOPER_SETUP). Strict equality across the whole env block made
+# that control impossible to turn on without failing the release as "drift",
+# so it is permitted by name. Every other variable is still drift: this is an
+# allowlist, not a relaxation.
+allowed_env = {"NODE_ENV", "ALLOWED_VIDEO_BUCKETS"}
+unexpected_env = sorted(set(env) - allowed_env)
+require(not unexpected_env, f"unexpected environment: {unexpected_env}")
 require(not spec.get("volumes"), "inherited volume")
 
 annotations = revision.get("metadata", {}).get("annotations", {})
@@ -241,6 +305,8 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+
+assert_platform_caller_present
 
 candidate_attempted=true
 gcloud run deploy "$service" \
@@ -313,12 +379,18 @@ printf 'header = "Authorization: Bearer %s"\n' "$id_token" \
 anonymous_code="$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' "$candidate_url/health")"
 test "$anonymous_code" = 403
 
+# Arm the rollback BEFORE the mutation, not after. gcloud can fail after the
+# traffic change has already been applied server-side (a dropped connection
+# while polling the operation is enough), and that failure mode would otherwise
+# leave the candidate serving with `shifted=false` — meaning the trap declines
+# to roll back exactly when it is most needed. Rolling back to the revision
+# already at 100% is a harmless no-op, so arming early is strictly safer.
+shifted=true
 gcloud run services update-traffic "$service" \
   --project "$project" \
   --region "$region" \
   --to-revisions "$candidate_revision=100" \
   --quiet
-shifted=true
 
 live_service_json="$(gcloud run services describe "$service" \
   --project "$project" \

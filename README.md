@@ -52,11 +52,37 @@ Cloud Run service, act as only `media-processor-runtime`, write build logs, and
 invoke this service for its post-deploy health proof. The runtime identity has
 zero project roles.
 
+Scope of the IAM assertion, stated plainly: the release reads the *service*-level
+IAM policy and proves no public binding and no unexpected service-level invoker
+exists. `roles/run.invoker` granted at project or folder level is invisible to
+it — and the release identity is expected to hold exactly such a grant, because
+the service-level policy is asserted to contain the platform caller and nothing
+else. Reading the project policy would require `resourcemanager.projects.getIamPolicy`
+on the release identity, widening it past the least privilege this release
+establishes. What proves the public edge is closed is the anonymous 403 probe
+against the live URL, not the policy read. Audit project-level invoker grants
+separately.
+
+Optionally set `ALLOWED_VIDEO_BUCKETS` (comma-separated) on the service to
+narrow the GCS host policy to specific buckets. It is the only environment
+variable the release permits besides `NODE_ENV`; anything else fails the
+revision contract as drift.
+
 Do not add `--allow-unauthenticated`, grant project-wide Editor/Owner, restore
 the deleted workstation IAM scripts, or deploy with the default Compute Engine
 service account.
 
 ## Release and rollback
+
+Sequencing caveat, because `--no-traffic` does not isolate it: the
+`--no-allow-unauthenticated` flag on the candidate deploy is **service**-scoped
+and lands with the deploy, so the public edge closes for the revision currently
+serving 100% while the candidate still holds zero traffic. The candidate
+isolates new *code*, not the *authorization* change. That is why the release
+refuses to deploy at all until the platform caller already holds an
+unconditional `roles/run.invoker` binding, and why the OIDC proof gate exists:
+once the edge closes, rollback restores the previous revision but deliberately
+never restores public access.
 
 The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image and
 requires `_PLATFORM_OIDC_PROOF=platform-api@<exact 40-character serving SHA>`.

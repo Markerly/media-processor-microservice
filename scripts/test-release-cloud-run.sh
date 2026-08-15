@@ -37,7 +37,9 @@ fi
 
 if [[ "$1 $2 $3" == 'run services get-iam-policy' ]]; then
   if [[ "${FAKE_PUBLIC_IAM:-false}" == true ]]; then
-    printf '{"bindings":[{"role":"roles/run.invoker","members":["allUsers"]}]}\n'
+    # Includes the platform caller so this case still exercises the POST-deploy
+    # public-binding rejection rather than tripping the pre-flight caller check.
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["allUsers","serviceAccount:glassy-tube-622@appspot.gserviceaccount.com"]}]}\n'
   elif [[ "${FAKE_MISSING_CALLER_IAM:-false}" == true ]]; then
     printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:media-processor-release@glassy-tube-622.iam.gserviceaccount.com"]}]}\n'
   elif [[ "${FAKE_EXTRA_INVOKER_IAM:-false}" == true ]]; then
@@ -104,7 +106,7 @@ for argument in "$@"; do
 done
 [[ "${read_config:-false}" == true ]] && cat >/dev/null
 
-if [[ "$url" == 'https://markerly-dot-platform-api-dot-glassy-tube-622.appspot.com/versionz' ]]; then
+if [[ "$url" == 'https://platform-api-dot-glassy-tube-622.appspot.com/versionz' ]]; then
   [[ "${FAKE_PLATFORM_UNAVAILABLE:-false}" == true ]] && exit 22
   if [[ "${FAKE_PLATFORM_MALFORMED:-false}" == true ]]; then
     printf 'not-json\n'
@@ -114,8 +116,16 @@ if [[ "$url" == 'https://markerly-dot-platform-api-dot-glassy-tube-622.appspot.c
   exit 0
 fi
 
+# --write-out is only used by the anonymous probes, so this branch decides what
+# the public edge looks like. The two probes are distinguished by the shift
+# marker, which lets a test open the edge at the candidate stage (must abort
+# before traffic moves) or only after the shift (must roll back).
 if [[ "$write_out" == true ]]; then
-  printf '403'
+  if [[ -f "$FAKE_STATE_DIR/shifted" ]]; then
+    printf '%s' "${FAKE_ANONYMOUS_CODE_LIVE:-${FAKE_ANONYMOUS_CODE:-403}}"
+  else
+    printf '%s' "${FAKE_ANONYMOUS_CODE:-403}"
+  fi
   exit 0
 fi
 
@@ -151,6 +161,8 @@ run_release_raw() {
   FAKE_PLATFORM_COMMIT="${FAKE_PLATFORM_COMMIT:-$platform_commit}" \
   FAKE_PLATFORM_MALFORMED="${FAKE_PLATFORM_MALFORMED:-false}" \
   FAKE_PLATFORM_UNAVAILABLE="${FAKE_PLATFORM_UNAVAILABLE:-false}" \
+  FAKE_ANONYMOUS_CODE="${FAKE_ANONYMOUS_CODE:-403}" \
+  FAKE_ANONYMOUS_CODE_LIVE="${FAKE_ANONYMOUS_CODE_LIVE:-}" \
     bash "$release_script" "$@"
 }
 
@@ -244,7 +256,10 @@ test "$status" -ne 0
 test ! -f "$state_dir/shifted"
 
 # Private is not synonymous with operational. The exact App Engine runtime
-# principal must have an unconditional invoker binding before traffic moves.
+# principal must have an unconditional invoker binding BEFORE the deploy, not
+# merely before traffic moves: --no-allow-unauthenticated closes the public edge
+# service-wide the moment the candidate lands, and no rollback reopens it. So
+# this must fail without ever reaching `run deploy`.
 reset_state
 set +e
 FAKE_MISSING_CALLER_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
@@ -252,6 +267,11 @@ status=$?
 set -e
 test "$status" -ne 0
 test ! -f "$state_dir/shifted"
+grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
+# Counted rather than negated: `! grep ...` is exempt from errexit, so it would
+# report nothing and assert nothing. `|| true` keeps the expected zero-match
+# case from tripping errexit inside the substitution.
+test "$(grep -c 'run deploy media-processor' "$state_dir/gcloud.log" || true)" -eq 0
 
 # Extra invokers are not equivalent to the reviewed platform caller.
 reset_state
@@ -270,6 +290,31 @@ status=$?
 set -e
 test "$status" -ne 0
 test ! -f "$state_dir/shifted"
+
+# The anonymous probe is the only check that reads the live edge rather than the
+# declared policy, and IAM propagation is explicitly eventual ("may take a few
+# moments to take effect"). An edge that still answers an unauthenticated caller
+# must therefore stop the release even when every declarative assertion passed.
+reset_state
+set +e
+FAKE_ANONYMOUS_CODE=200 run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
+
+# Same proof after the shift: the stable URL answering anonymously is the exact
+# condition this release exists to eliminate, so it must roll back rather than
+# leave a publicly reachable revision serving 100%.
+reset_state
+set +e
+FAKE_ANONYMOUS_CODE_LIVE=200 run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test -f "$state_dir/shifted"
+test -f "$state_dir/rolled-back"
+test "$(<"$state_dir/active")" = media-old
 
 # Adversarial path: once traffic has shifted, a failed live proof must restore
 # and re-describe the exact prior revision, then remove the candidate tag.
