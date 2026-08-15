@@ -16,10 +16,21 @@
 # guard-shaped-object INV-43 describes. Exit codes: 0 pass, 1 failed, 2
 # inconclusive, 77 unauthenticated.
 #
-# Usage: bash scripts/preflight-release.sh [PROJECT]
+# Usage: bash scripts/preflight-release.sh [PROJECT] [ACCOUNT]
+#
+# ACCOUNT is worth passing whenever more than one thing on the machine drives
+# gcloud. `gcloud config set account` is global, so a concurrent agent or shell
+# can move the active identity between two runs of this script and the answers
+# would quietly become about a different principal. Passing it here exports
+# CLOUDSDK_CORE_ACCOUNT for this process only — it never mutates shared config —
+# and the effective account is echoed below so a result can always be attributed.
 set -Eeuo pipefail
 
 project="${1:-glassy-tube-622}"
+account="${2:-${CLOUDSDK_CORE_ACCOUNT:-}}"
+if [[ -n "$account" ]]; then
+  export CLOUDSDK_CORE_ACCOUNT="$account"
+fi
 service='media-processor'
 region='us-central1'
 repo='media-processor-repo'
@@ -35,19 +46,34 @@ fail() { printf '  FAIL     %s\n' "$1" >&2; failures=$((failures + 1)); }
 unknown() { printf '  UNKNOWN  %s\n' "$1" >&2; unknowns=$((unknowns + 1)); }
 note() { printf '  note     %s\n' "$1"; }
 
-# Prove the credentials can actually reach THIS project before interpreting any
-# absence as meaningful.
+# Prove these credentials can actually reach THIS project before interpreting any
+# absence as meaningful. Distinguish the two ways that fails, because they need
+# opposite responses: a stale token means re-auth, a live token without access
+# means you are pointed at the wrong identity entirely.
+effective="$(gcloud config get-value account 2>/dev/null || true)"
+[[ -n "$effective" && "$effective" != "(unset)" ]] || effective='(none)'
+
 if ! gcloud auth print-access-token >/dev/null 2>&1; then
-  echo "not authenticated. Run: gcloud auth login" >&2
+  echo "account $effective has no usable credentials." >&2
+  echo "Run: gcloud auth login $effective" >&2
   exit 77
 fi
-if ! gcloud projects describe "$project" --format='value(projectId)' >/dev/null 2>&1; then
-  echo "cannot read project $project with the active gcloud account." >&2
-  echo "Run: gcloud auth login   (or: gcloud config set account <account>)" >&2
+if ! probe="$(gcloud projects describe "$project" --format='value(projectId)' 2>&1)"; then
+  echo "account $effective cannot read project $project." >&2
+  if grep -qi 'reauthentication\|invalid_grant\|refreshing your current auth' <<<"$probe"; then
+    echo "Cause: the credential is stale." >&2
+    echo "Run: gcloud auth login $effective" >&2
+  else
+    echo "Cause: authenticated, but this identity has no access to $project." >&2
+    echo "Pass the right one: bash scripts/preflight-release.sh $project <account>" >&2
+    echo "Credentialed accounts:" >&2
+    gcloud auth list --format='value(account)' 2>/dev/null | sed 's/^/  /' >&2
+  fi
   exit 77
 fi
 
 echo "Preflight for $service in $project"
+echo "  using account: $effective"
 
 echo
 echo "1. Least-privilege identities exist"

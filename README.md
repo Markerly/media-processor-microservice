@@ -77,8 +77,17 @@ service account.
 Before approving a release build, run:
 
 ```sh
-bash scripts/preflight-release.sh
+bash scripts/preflight-release.sh [PROJECT] [ACCOUNT]
 ```
+
+Pass `ACCOUNT` whenever more than one thing on the machine drives `gcloud`.
+`gcloud config set account` is global, so a concurrent shell or agent can move
+the active identity between runs and the answers would quietly become about a
+different principal. The argument exports `CLOUDSDK_CORE_ACCOUNT` for that
+process only, never mutating shared config, and the effective account is echoed
+in the output so any result can be attributed. An authenticated identity that
+simply lacks access to the project is reported differently from a stale
+credential — they need opposite fixes.
 
 It is read-only and answers, in one pass, the rollout checks that were otherwise
 prose: both least-privilege identities exist, the Artifact Registry repository
