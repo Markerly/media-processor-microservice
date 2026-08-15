@@ -74,6 +74,16 @@ region='us-central1'
 platform_caller='serviceAccount:glassy-tube-622@appspot.gserviceaccount.com'
 runtime_service_account="media-processor-runtime@$project.iam.gserviceaccount.com"
 release_service_account="media-processor-release@$project.iam.gserviceaccount.com"
+# Both Google-generated hostnames for this one service. platform-api mints
+# its ID token for the project-number URL (MEDIA_PROCESSOR_URL in the
+# production secret). status.url is the hash URL. Cloud Run's implicit
+# accepted audience is "the" *.run.app URL — which of the two is not a
+# contract. Setting both as custom audiences makes either token valid the
+# moment --no-allow-unauthenticated lands. Clearing them would re-open the
+# guess. These are also the two origins platform-api allowlists.
+platform_audience='https://media-processor-132233585000.us-central1.run.app'
+hash_audience='https://media-processor-65la52ndha-uc.a.run.app'
+accepted_audiences="${platform_audience},${hash_audience}"
 image="us-central1-docker.pkg.dev/$project/media-processor-repo/media-processor:$commit_sha"
 digest="$(gcloud artifacts docker images describe "$image" \
   --project "$project" \
@@ -205,6 +215,34 @@ assert granted, (
 ' "$platform_caller" <<<"$policy_json"
 }
 
+# Service-level custom audiences apply to every revision, including the one
+# still serving 100% when this deploy closes the public edge. Require both
+# production origins so a token minted for either hostname is accepted.
+assert_accepted_audiences() {
+  python3 -c '
+import json, sys
+service = json.load(sys.stdin)
+required = set(sys.argv[1].split(","))
+raw = (service.get("metadata") or {}).get("annotations", {}).get(
+    "run.googleapis.com/custom-audiences", "[]"
+)
+if isinstance(raw, list):
+    declared = set(raw)
+elif isinstance(raw, str):
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise AssertionError(f"custom-audiences annotation is not JSON: {error}") from error
+    if not isinstance(parsed, list):
+        raise AssertionError(f"custom-audiences annotation is not a list: {type(parsed).__name__}")
+    declared = set(parsed)
+else:
+    raise AssertionError(f"custom-audiences annotation has unexpected type {type(raw).__name__}")
+missing = sorted(required - declared)
+assert not missing, f"service is missing required ID-token audiences: {missing}"
+' "$accepted_audiences"
+}
+
 assert_runtime_revision() {
   local revision_name="$1" revision_json
   revision_json="$(gcloud run revisions describe "$revision_name" \
@@ -274,7 +312,10 @@ require(not annotations.get("run.googleapis.com/cloudsql-instances"), "inherited
 require(not annotations.get("run.googleapis.com/vpc-access-connector"), "inherited VPC connector")
 require(not annotations.get("run.googleapis.com/network-interfaces"), "inherited Direct VPC")
 require(not annotations.get("run.googleapis.com/vpc-access-egress"), "inherited VPC egress")
-require(not annotations.get("run.googleapis.com/custom-audiences"), "inherited custom audiences")
+# Custom audiences belong on the Service, not the revision template.
+# A template-level copy would be inherited drift; the service-level pin
+# is asserted separately after deploy.
+require(not annotations.get("run.googleapis.com/custom-audiences"), "inherited revision custom audiences")
 require(not annotations.get("run.googleapis.com/network"), "inherited network")
 ' "$deploy_image" "$runtime_service_account" <<<"$revision_json"
 }
@@ -366,7 +407,7 @@ gcloud run deploy "$service" \
   --clear-cloudsql-instances \
   --clear-vpc-connector \
   --clear-network \
-  --clear-custom-audiences \
+  --set-custom-audiences="$accepted_audiences" \
   --clear-volumes \
   --clear-volume-mounts \
   --startup-probe="httpGet.path=/health,httpGet.port=8080,timeoutSeconds=5,periodSeconds=5,failureThreshold=3" \
@@ -396,9 +437,20 @@ print(matches[0])
 ' "$candidate_tag" <<<"$service_json")"
 assert_runtime_revision "$candidate_revision"
 assert_invocation_iam
+assert_accepted_audiences <<<"$service_json"
 id_token="$(gcloud auth print-identity-token --audiences="$service_url")"
+# The platform caller mints for $platform_audience, not status.url. We cannot
+# mint as the App Engine SA (getOpenIdToken is self-only on that identity).
+# Audience is a property of the token, not the principal: a 200 here with a
+# token whose aud is the platform origin proves Cloud Run will accept the
+# token platform-api actually sends, once the edge is private.
+platform_id_token="$(gcloud auth print-identity-token --audiences="$platform_audience")"
 
 printf 'header = "Authorization: Bearer %s"\n' "$id_token" \
+  | curl --config - --fail --silent --show-error --max-time 15 \
+      "$candidate_url/health" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "healthy"'
+printf 'header = "Authorization: Bearer %s"\n' "$platform_id_token" \
   | curl --config - --fail --silent --show-error --max-time 15 \
       "$candidate_url/health" \
   | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "healthy"'
@@ -428,6 +480,10 @@ assert_runtime_revision "$live_revision"
 assert_invocation_iam
 
 printf 'header = "Authorization: Bearer %s"\n' "$id_token" \
+  | curl --config - --fail --silent --show-error --max-time 15 \
+      "$service_url/health" \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "healthy"'
+printf 'header = "Authorization: Bearer %s"\n' "$platform_id_token" \
   | curl --config - --fail --silent --show-error --max-time 15 \
       "$service_url/health" \
   | python3 -c 'import json,sys; assert json.load(sys.stdin)["status"] == "healthy"'
