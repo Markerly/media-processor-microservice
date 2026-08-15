@@ -4,7 +4,8 @@
 
 const express = require('express');
 const fs = require('fs');
-const { generateThumbnail, cleanupThumbnail } = require('../services/thumbnailGenerator');
+const path = require('path');
+const { generateThumbnail, cleanupThumbnail, CONFIG } = require('../services/thumbnailGenerator');
 const { thumbnailLimiter } = require('../middleware/rateLimiter');
 const chalk = require('chalk');
 const {
@@ -15,6 +16,25 @@ const {
 } = require('../lib/videoUrlPolicy');
 
 const router = express.Router();
+
+function assertJpegThumbnail(thumbnailPath) {
+    const resolved = path.resolve(thumbnailPath);
+    if (path.dirname(resolved) !== CONFIG.tempDir || path.extname(resolved) !== '.jpg') {
+        throw new Error('Generated thumbnail file is empty');
+    }
+    const header = Buffer.alloc(3);
+    const fd = fs.openSync(resolved, 'r');
+    try {
+        if (fs.readSync(fd, header, 0, 3, 0) !== 3) {
+            throw new Error('Generated thumbnail file is empty');
+        }
+    } finally {
+        fs.closeSync(fd);
+    }
+    if (header[0] !== 0xff || header[1] !== 0xd8 || header[2] !== 0xff) {
+        throw new Error('Generated thumbnail file is empty');
+    }
+}
 
 /**
  * POST /generate-thumbnail
@@ -30,12 +50,11 @@ const router = express.Router();
  * }
  *
  * Returns: Thumbnail image file (image/jpeg)
- * Rate limit: 50 requests per 15 minutes per IP
+ * Rate limit: 100 requests per 15 minutes per IP
  */
 router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
     const { videoUrl: presentedVideoUrl, timePosition, size, quality } = req.body || {};
 
-    // Validation: videoUrl is required
     if (!presentedVideoUrl) {
         return res.status(400).json({
             error: 'Bad Request',
@@ -61,19 +80,21 @@ router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
     try {
         console.log(chalk.cyan('[Thumbnail Route] Request received for video:'), videoUrlForLog(videoUrl));
 
-        // Generate thumbnail
         thumbnailPath = await generateThumbnail(videoUrl, options);
 
-        // Check if file exists and has content
         const stats = fs.statSync(thumbnailPath);
         if (stats.size === 0) {
             throw new Error('Generated thumbnail file is empty');
         }
+        assertJpegThumbnail(thumbnailPath);
 
         console.log(chalk.green('[Thumbnail Route] ✓ Sending thumbnail file:'), thumbnailPath, chalk.gray(`(${stats.size} bytes)`));
 
-        // Send file as response
-        res.sendFile(thumbnailPath, (err) => {
+        res.sendFile(path.basename(thumbnailPath), {
+            root: CONFIG.tempDir,
+            dotfiles: 'deny',
+            headers: { 'Content-Type': 'image/jpeg' },
+        }, (err) => {
             if (err) {
                 console.error(chalk.red('[Thumbnail Route] ✗ Error sending file'), {
                     errorType: err?.name || 'Error'
@@ -86,7 +107,6 @@ router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
                 }
             }
 
-            // Cleanup after sending (or on error)
             if (thumbnailPath) {
                 cleanupThumbnail(thumbnailPath).catch(() => {});
             }
@@ -97,7 +117,6 @@ router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
             errorType: error?.name || 'Error'
         });
 
-        // Cleanup on error
         if (thumbnailPath) {
             cleanupThumbnail(thumbnailPath).catch(() => {});
         }

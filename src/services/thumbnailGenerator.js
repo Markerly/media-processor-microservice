@@ -9,7 +9,11 @@ const path = require('path');
 const fs = require('fs').promises;
 const { randomUUID } = require('crypto');
 const chalk = require('chalk');
-const { videoUrlForLog } = require('../lib/videoUrlPolicy');
+const {
+    ffmpegInputFormat,
+    validatedVideoUrl,
+    videoUrlForLog,
+} = require('../lib/videoUrlPolicy');
 
 /**
  * Configuration for thumbnail generation
@@ -28,8 +32,38 @@ const CONFIG = {
     processingTimeout: 25000, // 25 seconds (leave buffer for HTTP timeout)
 
     // Temp directory
-    tempDir: '/tmp'
+    tempDir: '/tmp',
+
+    // Cap the JPEG so a decoder bomb cannot fill the tmpfs.
+    maxOutputBytes: 5 * 1024 * 1024,
 };
+
+function buildFfmpegArgs(videoUrl, outputPath, config) {
+    const safeUrl = validatedVideoUrl(videoUrl);
+    const inputFormat = ffmpegInputFormat(safeUrl);
+    const quality = Math.max(1, Math.round((100 - config.quality) / 10));
+
+    return [
+        '-nostdin',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-protocol_whitelist', 'https,tls,tcp',
+        '-max_redirects', '0',
+        '-rw_timeout', '15000000',
+        '-ss', config.timePosition,
+        '-t', '1',
+        '-f', inputFormat,
+        '-i', safeUrl,
+        '-an',
+        '-frames:v', '1',
+        '-q:v', String(quality),
+        '-vf', `scale=${config.width}:${config.height}`,
+        '-f', 'image2',
+        '-fs', String(CONFIG.maxOutputBytes),
+        '-y',
+        outputPath,
+    ];
+}
 
 /**
  * Generates a thumbnail from a video URL
@@ -51,9 +85,11 @@ async function generateThumbnail(videoUrl, options = {}) {
         timeout: options.timeout || CONFIG.processingTimeout,
     };
 
-    // Generate unique output filename
     const outputFilename = `thumb_${randomUUID()}.jpg`;
     const outputPath = path.join(CONFIG.tempDir, outputFilename);
+    if (path.dirname(outputPath) !== CONFIG.tempDir) {
+        throw new Error('Unable to initialize thumbnail generation');
+    }
 
     console.log(chalk.cyan('[Thumbnail Generator] Starting generation'));
     console.log(chalk.cyan('[Thumbnail Generator] Video URL:'), videoUrlForLog(videoUrl));
@@ -70,21 +106,7 @@ async function generateThumbnail(videoUrl, options = {}) {
             reject(error);
         };
 
-        const args = [
-            '-nostdin',
-            '-hide_banner',
-            '-loglevel', 'error',
-            '-protocol_whitelist', 'https,tls,tcp',
-            '-rw_timeout', '15000000',
-            '-ss', config.timePosition,
-            '-i', videoUrl,
-            '-frames:v', '1',
-            '-q:v', String(Math.max(1, Math.round((100 - config.quality) / 10))),
-            '-vf', `scale=${config.width}:${config.height}`,
-            '-y',
-            outputPath,
-        ];
-
+        const args = buildFfmpegArgs(videoUrl, outputPath, config);
         const command = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
         command.stderr.on('data', () => {});
 
@@ -135,5 +157,6 @@ async function cleanupThumbnail(thumbnailPath) {
 module.exports = {
     generateThumbnail,
     cleanupThumbnail,
+    buildFfmpegArgs,
     CONFIG
 };

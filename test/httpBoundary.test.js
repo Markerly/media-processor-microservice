@@ -32,6 +32,16 @@ describe('HTTP request boundary', () => {
             });
     });
 
+    test('a lookalike GCS host is rejected before FFmpeg starts', async () => {
+        await request(app)
+            .post('/generate-thumbnail')
+            .send({ videoUrl: 'https://.storage.googleapis.com/video.mp4' })
+            .expect(400, {
+                error: 'Bad Request',
+                message: 'The video URL or thumbnail options are invalid',
+            });
+    });
+
     test('a missing JSON body fails as a bounded client error', async () => {
         await request(app)
             .post('/generate-thumbnail')

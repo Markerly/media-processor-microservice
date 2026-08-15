@@ -14,9 +14,11 @@ Google Storage HTTPS hostname and a supported video extension. Redirect-capable
 generic URLs, metadata hosts, hostname lookalikes, URL userinfo, and nonstandard
 ports are rejected before FFmpeg starts.
 
-The service never logs signed query credentials or object paths. FFmpeg runs as
-the non-root `node` user, receives an argument array rather than a shell command,
-has a restricted network protocol allowlist, and is killed on a bounded timeout.
+The service never logs signed query credentials, bucket names, or object paths.
+FFmpeg runs as the non-root `node` user, receives an argument array rather than
+a shell command, has a restricted network protocol allowlist, follows no HTTP
+redirects, forces a demuxer from the validated extension, and is killed on a
+bounded timeout.
 
 ## Local verification
 
@@ -63,7 +65,8 @@ private cutover: before its first gcloud lookup, the release requires the exact
 commit in that proof to match production platform-api's `/versionz` attestation.
 The release
 deploys under the zero-role runtime identity, clears inherited secrets,
-database/VPC attachments, volumes, command/argument overrides, and probes,
+database/VPC attachments including Direct VPC, custom audiences, volumes,
+command/argument overrides, and probes,
 then independently re-describes the candidate and verifies its digest,
 identity, one-container shape, environment, resource ceilings, startup probe,
 and private IAM before traffic moves.

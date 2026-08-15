@@ -40,6 +40,8 @@ if [[ "$1 $2 $3" == 'run services get-iam-policy' ]]; then
     printf '{"bindings":[{"role":"roles/run.invoker","members":["allUsers"]}]}\n'
   elif [[ "${FAKE_MISSING_CALLER_IAM:-false}" == true ]]; then
     printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:media-processor-release@glassy-tube-622.iam.gserviceaccount.com"]}]}\n'
+  elif [[ "${FAKE_EXTRA_INVOKER_IAM:-false}" == true ]]; then
+    printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:glassy-tube-622@appspot.gserviceaccount.com","user:attacker@example.com"]}]}\n'
   else
     printf '{"bindings":[{"role":"roles/run.invoker","members":["serviceAccount:glassy-tube-622@appspot.gserviceaccount.com"]}]}\n'
   fi
@@ -49,7 +51,9 @@ fi
 if [[ "$1 $2 $3" == 'run revisions describe' ]]; then
   memory='2Gi'
   [[ "${FAKE_DRIFT_REVISION:-false}" == true ]] && memory='1Gi'
-  printf '{"metadata":{"annotations":{"autoscaling.knative.dev/maxScale":"10","run.googleapis.com/execution-environment":"gen2"}},"status":{"imageDigest":"us-central1-docker.pkg.dev/glassy-tube-622/media-processor-repo/media-processor@sha256:%064d","conditions":[{"type":"Ready","status":"True"}]},"spec":{"serviceAccountName":"media-processor-runtime@glassy-tube-622.iam.gserviceaccount.com","containerConcurrency":2,"timeoutSeconds":300,"containers":[{"resources":{"limits":{"cpu":"2","memory":"%s"}},"ports":[{"containerPort":8080}],"env":[{"name":"NODE_ENV","value":"production"}],"startupProbe":{"httpGet":{"path":"/health","port":8080}}}],"volumes":[]}}\n' 0 "$memory"
+  extra_annotation=''
+  [[ "${FAKE_DIRECT_VPC:-false}" == true ]] && extra_annotation=',"run.googleapis.com/network-interfaces":"[{\\"network\\":\\"default\\"}]"'
+  printf '{"metadata":{"annotations":{"autoscaling.knative.dev/maxScale":"10","run.googleapis.com/execution-environment":"gen2"%s}},"status":{"imageDigest":"us-central1-docker.pkg.dev/glassy-tube-622/media-processor-repo/media-processor@sha256:%064d","conditions":[{"type":"Ready","status":"True"}]},"spec":{"serviceAccountName":"media-processor-runtime@glassy-tube-622.iam.gserviceaccount.com","containerConcurrency":2,"timeoutSeconds":300,"containers":[{"resources":{"limits":{"cpu":"2","memory":"%s"}},"ports":[{"containerPort":8080}],"env":[{"name":"NODE_ENV","value":"production"}],"startupProbe":{"httpGet":{"path":"/health","port":8080}}}],"volumes":[]}}\n' "$extra_annotation" 0 "$memory"
   exit 0
 fi
 
@@ -142,6 +146,8 @@ run_release_raw() {
   FAKE_DRIFT_REVISION="${FAKE_DRIFT_REVISION:-false}" \
   FAKE_PUBLIC_IAM="${FAKE_PUBLIC_IAM:-false}" \
   FAKE_MISSING_CALLER_IAM="${FAKE_MISSING_CALLER_IAM:-false}" \
+  FAKE_EXTRA_INVOKER_IAM="${FAKE_EXTRA_INVOKER_IAM:-false}" \
+  FAKE_DIRECT_VPC="${FAKE_DIRECT_VPC:-false}" \
   FAKE_PLATFORM_COMMIT="${FAKE_PLATFORM_COMMIT:-$platform_commit}" \
   FAKE_PLATFORM_MALFORMED="${FAKE_PLATFORM_MALFORMED:-false}" \
   FAKE_PLATFORM_UNAVAILABLE="${FAKE_PLATFORM_UNAVAILABLE:-false}" \
@@ -209,7 +215,8 @@ grep -q -- '--no-allow-unauthenticated' "$state_dir/gcloud.log"
 grep -q -- '--no-traffic' "$state_dir/gcloud.log"
 grep -q -- '--cpu 2 --concurrency 2' "$state_dir/gcloud.log"
 grep -q -- '--command= --args= --liveness-probe=' "$state_dir/gcloud.log"
-grep -q -- '--clear-secrets --clear-cloudsql-instances --clear-vpc-connector' "$state_dir/gcloud.log"
+grep -q -- '--clear-secrets --clear-cloudsql-instances --clear-vpc-connector --clear-network --clear-custom-audiences' "$state_dir/gcloud.log"
+grep -q -- '--ingress=all' "$state_dir/gcloud.log"
 grep -q 'run revisions describe media-candidate' "$state_dir/gcloud.log"
 grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
 grep -q 'media-candidate=100' "$state_dir/gcloud.log"
@@ -241,6 +248,24 @@ test ! -f "$state_dir/shifted"
 reset_state
 set +e
 FAKE_MISSING_CALLER_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
+
+# Extra invokers are not equivalent to the reviewed platform caller.
+reset_state
+set +e
+FAKE_EXTRA_INVOKER_IAM=true run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
+
+# Inherited Direct VPC is an SSRF expansion and must receive zero traffic.
+reset_state
+set +e
+FAKE_DIRECT_VPC=true run_release true "$oidc_proof" >/dev/null 2>&1
 status=$?
 set -e
 test "$status" -ne 0

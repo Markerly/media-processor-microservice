@@ -34,14 +34,14 @@ if [[ ! "$oidc_proof" =~ ^platform-api@[a-f0-9]{40}$ ]]; then
   exit 64
 fi
 
-# A syntactically plausible SHA is not evidence. Resolve the public production
-# attestation before the first Cloud Run/Artifact Registry mutation and require
-# the exact reviewed caller commit to be serving. This closes the gap where an
-# operator could unlock the private cutover with a stale or invented 40-hex
-# value while platform-api still lacked the ID-token caller.
+# Refuse Cloud Run mutations unless production /versionz commit equals the proof SHA.
 platform_commit="${oidc_proof#platform-api@}"
 platform_version_url='https://markerly-dot-platform-api-dot-glassy-tube-622.appspot.com/versionz'
-if ! platform_version_json="$(curl --fail --silent --show-error --max-time 15 "$platform_version_url")"; then
+if ! platform_version_json="$(curl --fail --silent --show-error --proto '=https' --max-time 15 --max-filesize 16384 "$platform_version_url")"; then
+  echo "private cutover blocked: platform-api /versionz is unreachable" >&2
+  exit 78
+fi
+if [[ "${#platform_version_json}" -gt 16384 ]]; then
   echo "private cutover blocked: platform-api /versionz is unreachable" >&2
   exit 78
 fi
@@ -103,27 +103,24 @@ import json, sys
 policy = json.load(sys.stdin)
 expected_caller = sys.argv[1]
 public = {"allUsers", "allAuthenticatedUsers"}
-public_members = [
-    member
-    for binding in policy.get("bindings", [])
-    if binding.get("role") == "roles/run.invoker"
-    for member in binding.get("members", [])
-    if member in public
-]
-caller_bindings = [
+invoker_bindings = [
     binding
     for binding in policy.get("bindings", [])
     if binding.get("role") == "roles/run.invoker"
-    and expected_caller in binding.get("members", [])
 ]
-unconditional = [binding for binding in caller_bindings if not binding.get("condition")]
+invoker_members = [
+    member
+    for binding in invoker_bindings
+    for member in binding.get("members", [])
+]
+public_members = [member for member in invoker_members if member in public]
+unconditional = [binding for binding in invoker_bindings if not binding.get("condition")]
 assert public_members == [], f"public Run Invoker binding remains: {public_members}"
-assert len(caller_bindings) == 1, (
-    f"expected exactly one Run Invoker binding for {expected_caller}, "
-    f"got {len(caller_bindings)}"
+assert set(invoker_members) == {expected_caller}, (
+    f"Run Invoker members must be exactly [{expected_caller}], got {invoker_members}"
 )
-assert len(unconditional) == 1, (
-    f"the platform caller binding for {expected_caller} must be unconditional"
+assert len(invoker_bindings) == 1 and len(unconditional) == 1, (
+    f"the platform caller binding for {expected_caller} must be the only unconditional invoker"
 )
 ' "$expected_caller" <<<"$policy_json"
 }
@@ -168,6 +165,7 @@ require(len(ports) == 1 and ports[0].get("containerPort") == 8080, "port drift")
 require(not container.get("command"), "inherited command override")
 require(not container.get("args"), "inherited argument override")
 require("livenessProbe" not in container, "inherited liveness probe")
+require("readinessProbe" not in container, "inherited readiness probe")
 require(not container.get("volumeMounts"), "inherited volume mount")
 
 startup = container.get("startupProbe", {}).get("httpGet", {})
@@ -184,6 +182,10 @@ require(annotations.get("autoscaling.knative.dev/minScale", "0") in {"", "0"}, "
 require(annotations.get("run.googleapis.com/execution-environment") == "gen2", "execution environment drift")
 require(not annotations.get("run.googleapis.com/cloudsql-instances"), "inherited Cloud SQL attachment")
 require(not annotations.get("run.googleapis.com/vpc-access-connector"), "inherited VPC connector")
+require(not annotations.get("run.googleapis.com/network-interfaces"), "inherited Direct VPC")
+require(not annotations.get("run.googleapis.com/vpc-access-egress"), "inherited VPC egress")
+require(not annotations.get("run.googleapis.com/custom-audiences"), "inherited custom audiences")
+require(not annotations.get("run.googleapis.com/network"), "inherited network")
 ' "$deploy_image" "$runtime_service_account" <<<"$revision_json"
 }
 
@@ -249,6 +251,7 @@ gcloud run deploy "$service" \
   --service-account "$runtime_service_account" \
   --no-allow-unauthenticated \
   --invoker-iam-check \
+  --ingress=all \
   --no-traffic \
   --tag "$candidate_tag" \
   --revision-suffix "$candidate_tag" \
@@ -270,6 +273,8 @@ gcloud run deploy "$service" \
   --clear-secrets \
   --clear-cloudsql-instances \
   --clear-vpc-connector \
+  --clear-network \
+  --clear-custom-audiences \
   --clear-volumes \
   --clear-volume-mounts \
   --startup-probe="httpGet.path=/health,httpGet.port=8080,timeoutSeconds=5,periodSeconds=5,failureThreshold=3" \
@@ -331,12 +336,14 @@ printf 'header = "Authorization: Bearer %s"\n' "$id_token" \
 anonymous_code="$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' "$service_url/health")"
 test "$anonymous_code" = 403
 
+# Live proofs passed. Tag cleanup is hygiene and must not roll traffic back.
+succeeded=true
 gcloud run services update-traffic "$service" \
   --project "$project" \
   --region "$region" \
   --remove-tags "$candidate_tag" \
-  --quiet
-succeeded=true
+  --quiet \
+  || echo "candidate tag cleanup failed" >&2
 trap - EXIT
 
 echo "released $candidate_revision from $deploy_image"

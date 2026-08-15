@@ -123,6 +123,19 @@ docker exec "$container" node -e '
     .catch(() => process.exit(1));
 '
 
+# URL policy forbids non-GCS inputs, so prove the runtime FFmpeg binary can
+# still decode a frame to JPEG without going through the HTTP route.
+docker exec "$container" ffmpeg -nostdin -hide_banner -loglevel error \
+  -f lavfi -i 'testsrc=duration=1:size=160x120:rate=1' \
+  -frames:v 1 -f image2 -y /tmp/ffmpeg-ok.jpg
+docker exec "$container" node -e '
+  const fs = require("fs");
+  const bytes = fs.readFileSync("/tmp/ffmpeg-ok.jpg");
+  if (bytes.length < 32 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
+    process.exit(1);
+  }
+'
+
 test "$(docker inspect "$container" --format '{{.Config.User}}')" = 'node:node'
 docker exec "$container" sh -c \
   'test "$(id -u):$(id -g)" = 1000:1000 && ! command -v npm && ! command -v npx'
