@@ -24,13 +24,18 @@ fi
 if [[ "$1 $2 $3" == 'run services describe' ]]; then
   active='media-old'
   [[ -f "$FAKE_STATE_DIR/active" ]] && active="$(<"$FAKE_STATE_DIR/active")"
+  if [[ "${FAKE_MISSING_AUDIENCES:-false}" == true ]]; then
+    audiences_json='"[]"'
+  else
+    audiences_json='"[\"https://media-processor-132233585000.us-central1.run.app\", \"https://media-processor-65la52ndha-uc.a.run.app\"]"'
+  fi
   if [[ -f "$FAKE_STATE_DIR/tag" ]]; then
     tag="$(<"$FAKE_STATE_DIR/tag")"
     tag_percent=''
     [[ "$active" == media-candidate ]] && tag_percent=',"percent":100'
-    printf '{"status":{"url":"https://media.example","traffic":[{"revisionName":"%s","percent":100},{"revisionName":"media-candidate","tag":"%s"%s,"url":"https://candidate.example"}]}}\n' "$active" "$tag" "$tag_percent"
+    printf '{"metadata":{"annotations":{"run.googleapis.com/custom-audiences":%s}},"status":{"url":"https://media.example","traffic":[{"revisionName":"%s","percent":100},{"revisionName":"media-candidate","tag":"%s"%s,"url":"https://candidate.example"}]}}\n' "$audiences_json" "$active" "$tag" "$tag_percent"
   else
-    printf '{"status":{"url":"https://media.example","traffic":[{"revisionName":"%s","percent":100}]}}\n' "$active"
+    printf '{"metadata":{"annotations":{"run.googleapis.com/custom-audiences":%s}},"status":{"url":"https://media.example","traffic":[{"revisionName":"%s","percent":100}]}}\n' "$audiences_json" "$active"
   fi
   exit 0
 fi
@@ -169,6 +174,7 @@ run_release_raw() {
   FAKE_PLATFORM_UNAVAILABLE="${FAKE_PLATFORM_UNAVAILABLE:-false}" \
   FAKE_ANONYMOUS_CODE="${FAKE_ANONYMOUS_CODE:-403}" \
   FAKE_ANONYMOUS_CODE_LIVE="${FAKE_ANONYMOUS_CODE_LIVE:-}" \
+  FAKE_MISSING_AUDIENCES="${FAKE_MISSING_AUDIENCES:-false}" \
     bash "$release_script" "$@"
 }
 
@@ -233,7 +239,11 @@ grep -q -- '--no-allow-unauthenticated' "$state_dir/gcloud.log"
 grep -q -- '--no-traffic' "$state_dir/gcloud.log"
 grep -q -- '--cpu 2 --concurrency 2' "$state_dir/gcloud.log"
 grep -q -- '--command= --args= --liveness-probe=' "$state_dir/gcloud.log"
-grep -q -- '--clear-secrets --clear-cloudsql-instances --clear-vpc-connector --clear-network --clear-custom-audiences' "$state_dir/gcloud.log"
+grep -q -- '--clear-secrets --clear-cloudsql-instances --clear-vpc-connector --clear-network' "$state_dir/gcloud.log"
+grep -q -- '--set-custom-audiences=https://media-processor-132233585000.us-central1.run.app,https://media-processor-65la52ndha-uc.a.run.app' "$state_dir/gcloud.log"
+grep -q -- '--audiences=https://media.example' "$state_dir/gcloud.log"
+grep -q -- '--audiences=https://media-processor-132233585000.us-central1.run.app' "$state_dir/gcloud.log"
+test "$(grep -c 'auth print-identity-token --audiences=' "$state_dir/gcloud.log")" -eq 2
 grep -q -- '--ingress=all' "$state_dir/gcloud.log"
 grep -q 'run revisions describe media-candidate' "$state_dir/gcloud.log"
 grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
@@ -278,6 +288,18 @@ grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
 # report nothing and assert nothing. `|| true` keeps the expected zero-match
 # case from tripping errexit inside the substitution.
 test "$(grep -c 'run deploy media-processor' "$state_dir/gcloud.log" || true)" -eq 0
+
+# Both Google-generated hostnames must be accepted audiences before traffic
+# moves: the platform caller mints for the project-number URL, status.url is
+# the hash URL, and guessing which one Cloud Run treats as "the" default is
+# how this release 403s the only caller.
+reset_state
+set +e
+FAKE_MISSING_AUDIENCES=true run_release true "$oidc_proof" >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -ne 0
+test ! -f "$state_dir/shifted"
 
 # Extra invokers are not equivalent to the reviewed platform caller. The default
 # fake policy already carries the release identity alongside the caller, so the

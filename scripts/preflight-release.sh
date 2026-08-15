@@ -196,7 +196,42 @@ else
 fi
 
 echo
-echo "5. Proof value for the build approval"
+echo "5. ID-token audiences"
+# Service-level; empty today is expected (the cutover release pins them).
+# Report what is there so a missing pin after the first private release is visible.
+if [[ -n "${policy:-}" ]]; then
+  if service_json="$(gcloud run services describe "$service" --project "$project" \
+       --region "$region" --format=json 2>/dev/null)"; then
+    python3 -c '
+import json, sys
+service = json.loads(sys.argv[1])
+required = {
+    "https://media-processor-132233585000.us-central1.run.app",
+    "https://media-processor-65la52ndha-uc.a.run.app",
+}
+raw = (service.get("metadata") or {}).get("annotations", {}).get(
+    "run.googleapis.com/custom-audiences", "[]"
+)
+try:
+    declared = set(json.loads(raw) if isinstance(raw, str) else raw or [])
+except ValueError:
+    declared = set()
+missing = sorted(required - declared)
+if not declared:
+    print("  note     no custom audiences yet — the cutover release will pin both run.app URLs")
+elif missing:
+    print("  FAIL     missing ID-token audiences the platform caller uses: " + ", ".join(missing))
+    raise SystemExit(1)
+else:
+    print("  PASS     both production run.app URLs are accepted audiences")
+' "$service_json" || failures=$((failures + 1))
+  else
+    unknown "cannot describe $service to read custom audiences"
+  fi
+fi
+
+echo
+echo "6. Proof value for the build approval"
 if serving="$(curl --fail --silent --show-error --proto '=https' --max-time 15 \
      --max-filesize 16384 "$versionz" 2>/dev/null)"; then
   commit="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("commit",""))' \

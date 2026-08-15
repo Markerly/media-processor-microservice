@@ -128,11 +128,20 @@ private cutover: before its first gcloud lookup, the release requires the exact
 commit in that proof to match production platform-api's `/versionz` attestation.
 The release
 deploys under the zero-role runtime identity, clears inherited secrets,
-database/VPC attachments including Direct VPC, custom audiences, volumes,
-command/argument overrides, and probes,
-then independently re-describes the candidate and verifies its digest,
-identity, one-container shape, environment, resource ceilings, startup probe,
-and private IAM before traffic moves.
+database/VPC attachments including Direct VPC, volumes,
+command/argument overrides, and probes, and **sets** custom audiences to both
+Google-generated hostnames for this service (`…us-central1.run.app` and
+`…uc.a.run.app`). platform-api mints its ID token for the first; `status.url`
+is the second. Cloud Run's implicit accepted audience is "the" `*.run.app`
+URL — which of the two is not a contract we should guess at the moment the
+public edge closes. The release then proves `/health` twice on the private
+candidate: once with a token minted for `status.url`, and once with a token
+minted for the platform origin. (We cannot mint as the App Engine SA —
+`getOpenIdToken` is self-only on that identity — but audience is a property
+of the token, not the principal.) It independently re-describes the
+candidate and verifies its digest, identity, one-container shape,
+environment, resource ceilings, startup probe, private IAM, and the
+audience pin before traffic moves.
 
 Runtime concurrency is pinned to two on a two-vCPU instance so a request burst
 cannot fan out dozens of simultaneous FFmpeg processes inside one container;
