@@ -17,22 +17,39 @@ const {
 
 const router = express.Router();
 
+/**
+ * A failure this file constructs itself. The distinction matters for logging:
+ * these messages are authored here and provably carry no request data, no
+ * signed URL, and no third-party exception text, so they are safe to record in
+ * full. FFmpeg, fs, and HTTP-client exceptions are not, and stay redacted to
+ * their `name`.
+ */
+class ThumbnailIntegrityError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'ThumbnailIntegrityError';
+    }
+}
+
+// Each branch names its own cause. Collapsing all three into "file is empty"
+// made the single log line an operator sees during an incident describe a
+// defect that had not occurred.
 function assertJpegThumbnail(thumbnailPath) {
     const resolved = path.resolve(thumbnailPath);
     if (path.dirname(resolved) !== CONFIG.tempDir || path.extname(resolved) !== '.jpg') {
-        throw new Error('Generated thumbnail file is empty');
+        throw new ThumbnailIntegrityError(`generated thumbnail escaped ${CONFIG.tempDir}/*.jpg`);
     }
     const header = Buffer.alloc(3);
     const fd = fs.openSync(resolved, 'r');
     try {
         if (fs.readSync(fd, header, 0, 3, 0) !== 3) {
-            throw new Error('Generated thumbnail file is empty');
+            throw new ThumbnailIntegrityError('generated thumbnail is shorter than a JPEG header');
         }
     } finally {
         fs.closeSync(fd);
     }
     if (header[0] !== 0xff || header[1] !== 0xd8 || header[2] !== 0xff) {
-        throw new Error('Generated thumbnail file is empty');
+        throw new ThumbnailIntegrityError('generated thumbnail is not JPEG (missing SOI marker)');
     }
 }
 
@@ -84,7 +101,7 @@ router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
 
         const stats = fs.statSync(thumbnailPath);
         if (stats.size === 0) {
-            throw new Error('Generated thumbnail file is empty');
+            throw new ThumbnailIntegrityError('generated thumbnail file is empty');
         }
         assertJpegThumbnail(thumbnailPath);
 
@@ -114,7 +131,11 @@ router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
 
     } catch (error) {
         console.error(chalk.red('[Thumbnail Route] ✗ Processing failed'), {
-            errorType: error?.name || 'Error'
+            errorType: error?.name || 'Error',
+            // Only messages this service authored are safe to log verbatim;
+            // FFmpeg and HTTP-client exception text can carry the signed URL
+            // and object path this service is required never to record.
+            ...(error instanceof ThumbnailIntegrityError ? { reason: error.message } : {}),
         });
 
         if (thumbnailPath) {

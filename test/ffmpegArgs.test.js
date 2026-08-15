@@ -1,4 +1,5 @@
 const { buildFfmpegArgs } = require('../src/services/thumbnailGenerator');
+const { VideoUrlValidationError } = require('../src/lib/videoUrlPolicy');
 
 describe('FFmpeg argument contract', () => {
     const videoUrl = 'https://storage.googleapis.com/bucket/clip.mp4?X-Goog-Signature=secret';
@@ -31,5 +32,30 @@ describe('FFmpeg argument contract', () => {
             '/tmp/thumb.jpg',
             { width: 640, height: -1, timePosition: '00:00:01', quality: 85 },
         )).toThrow('videoUrl host is not allowed');
+    });
+
+    // The HTTP route normalizes options, but it is not the only possible caller
+    // and `-vf scale=W:H` is filter syntax: a width carrying `,drawtext=...`
+    // would render a local file into the returned JPEG. buildFfmpegArgs must
+    // therefore refuse options itself rather than trusting whoever called it.
+    test.each([
+        ['filter injection through width', { width: '640,drawtext=textfile=/etc/passwd', height: -1, timePosition: '00:00:01', quality: 85 }],
+        ['filter injection through height', { width: 640, height: '-1[a];movie=/etc/passwd', timePosition: '00:00:01', quality: 85 }],
+        ['argv injection through timePosition', { width: 640, height: -1, timePosition: '00:00:01 -f lavfi', quality: 85 }],
+        ['unbounded width', { width: 999999, height: -1, timePosition: '00:00:01', quality: 85 }],
+        ['non-integer quality', { width: 640, height: -1, timePosition: '00:00:01', quality: '85' }],
+        ['missing options entirely', undefined],
+    ])('refuses unvalidated options from a non-route caller: %s', (_label, config) => {
+        expect(() => buildFfmpegArgs(
+            'https://storage.googleapis.com/bucket/clip.mp4',
+            '/tmp/thumb.jpg',
+            config,
+        )).toThrow(VideoUrlValidationError);
+    });
+
+    test('never lets a filter expression reach the -vf argument', () => {
+        const injected = { width: '640,drawtext=text=pwned', height: -1, timePosition: '00:00:01', quality: 85 };
+        expect(() => buildFfmpegArgs('https://storage.googleapis.com/bucket/clip.mp4', '/tmp/t.jpg', injected))
+            .toThrow('size is outside the supported bounds');
     });
 });

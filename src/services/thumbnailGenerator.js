@@ -11,6 +11,7 @@ const { randomUUID } = require('crypto');
 const chalk = require('chalk');
 const {
     ffmpegInputFormat,
+    validatedFfmpegOptions,
     validatedVideoUrl,
     videoUrlForLog,
 } = require('../lib/videoUrlPolicy');
@@ -41,7 +42,12 @@ const CONFIG = {
 function buildFfmpegArgs(videoUrl, outputPath, config) {
     const safeUrl = validatedVideoUrl(videoUrl);
     const inputFormat = ffmpegInputFormat(safeUrl);
-    const quality = Math.max(1, Math.round((100 - config.quality) / 10));
+    // Re-assert the option bounds here, not just at the HTTP route: every value
+    // below is spliced into FFmpeg's argument vector, and `-vf scale=W:H` is
+    // filter syntax that an unbounded width could extend into a file-reading
+    // filter. This is the last point at which that is still cheap to stop.
+    const bounded = validatedFfmpegOptions(config);
+    const quality = Math.max(1, Math.round((100 - bounded.quality) / 10));
 
     return [
         '-nostdin',
@@ -50,14 +56,14 @@ function buildFfmpegArgs(videoUrl, outputPath, config) {
         '-protocol_whitelist', 'https,tls,tcp',
         '-max_redirects', '0',
         '-rw_timeout', '15000000',
-        '-ss', config.timePosition,
+        '-ss', bounded.timePosition,
         '-t', '1',
         '-f', inputFormat,
         '-i', safeUrl,
         '-an',
         '-frames:v', '1',
         '-q:v', String(quality),
-        '-vf', `scale=${config.width}:${config.height}`,
+        '-vf', `scale=${bounded.width}:${bounded.height}`,
         '-f', 'image2',
         '-fs', String(CONFIG.maxOutputBytes),
         '-y',
@@ -82,7 +88,13 @@ async function generateThumbnail(videoUrl, options = {}) {
         height: options.height ?? -1,
         timePosition: options.timePosition || CONFIG.thumbnailTime,
         quality: options.quality || CONFIG.jpegQuality,
-        timeout: options.timeout || CONFIG.processingTimeout,
+        // The SIGKILL deadline is the only thing that bounds a stalled FFmpeg,
+        // so a caller may shorten it but never extend it past the configured
+        // ceiling. An unbounded value here would hold a Cloud Run request slot
+        // (one of two per instance) for as long as the peer keeps the socket open.
+        timeout: Number.isInteger(options.timeout) && options.timeout > 0
+            ? Math.min(options.timeout, CONFIG.processingTimeout)
+            : CONFIG.processingTimeout,
     };
 
     const outputFilename = `thumb_${randomUUID()}.jpg`;

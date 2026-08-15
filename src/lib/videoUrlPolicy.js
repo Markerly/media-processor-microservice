@@ -129,13 +129,43 @@ function videoUrlForLog(value) {
     }
 }
 
-function normalizedThumbnailOptions({ timePosition, size, quality } = {}) {
-    const normalizedTime = timePosition ?? '00:00:01';
-    if (typeof normalizedTime !== 'string' ||
-        !/^(?:\d{1,2}:)?[0-5]\d:[0-5]\d(?:\.\d{1,3})?$/.test(normalizedTime)) {
+const TIME_POSITION = /^(?:\d{1,2}:)?[0-5]\d:[0-5]\d(?:\.\d{1,3})?$/;
+const MIN_DIMENSION = 64;
+const MAX_DIMENSION = 1920;
+
+function isBoundedDimension(value) {
+    return Number.isInteger(value) && value >= MIN_DIMENSION && value <= MAX_DIMENSION;
+}
+
+/**
+ * The single bound-enforcement point for every value that reaches the FFmpeg
+ * argument vector.
+ *
+ * `normalizedThumbnailOptions` parses the wire shape (a `WIDTHxHEIGHT` string)
+ * into these fields; `buildFfmpegArgs` re-asserts them on the way out. That
+ * second assertion is not redundant: `-vf scale=W:H` is filter *syntax*, so a
+ * width that never passed a bound lets a caller append filters — for example
+ * `640,drawtext=textfile=/etc/passwd` — and render a local file into the JPEG
+ * the service returns. Only the HTTP route normalizes today, so re-asserting
+ * at the argv boundary means a future caller that bypasses it (a queue worker,
+ * a batch job, a second endpoint) inherits the bound rather than silently
+ * reopening the hole.
+ */
+function validatedFfmpegOptions({ timePosition, width, height, quality } = {}) {
+    if (typeof timePosition !== 'string' || !TIME_POSITION.test(timePosition)) {
         throw new VideoUrlValidationError('timePosition must be a bounded timestamp');
     }
+    if (!isBoundedDimension(width) || (height !== -1 && !isBoundedDimension(height))) {
+        throw new VideoUrlValidationError('size is outside the supported bounds');
+    }
+    if (!Number.isInteger(quality) || quality < 1 || quality > 100) {
+        throw new VideoUrlValidationError('quality must be an integer from 1 through 100');
+    }
 
+    return { timePosition, width, height, quality };
+}
+
+function normalizedThumbnailOptions({ timePosition, size, quality } = {}) {
     const normalizedSize = size ?? '640x-1';
     if (typeof normalizedSize !== 'string') {
         throw new VideoUrlValidationError('size must be a string');
@@ -144,23 +174,13 @@ function normalizedThumbnailOptions({ timePosition, size, quality } = {}) {
     if (!sizeMatch) {
         throw new VideoUrlValidationError('size must be WIDTHxHEIGHT');
     }
-    const width = Number(sizeMatch[1]);
-    const height = Number(sizeMatch[2]);
-    if (width < 64 || width > 1920 || (height !== -1 && (height < 64 || height > 1920))) {
-        throw new VideoUrlValidationError('size is outside the supported bounds');
-    }
 
-    const normalizedQuality = quality ?? 85;
-    if (!Number.isInteger(normalizedQuality) || normalizedQuality < 1 || normalizedQuality > 100) {
-        throw new VideoUrlValidationError('quality must be an integer from 1 through 100');
-    }
-
-    return {
-        timePosition: normalizedTime,
-        width,
-        height,
-        quality: normalizedQuality,
-    };
+    return validatedFfmpegOptions({
+        timePosition: timePosition ?? '00:00:01',
+        width: Number(sizeMatch[1]),
+        height: Number(sizeMatch[2]),
+        quality: quality ?? 85,
+    });
 }
 
 module.exports = {
@@ -168,5 +188,6 @@ module.exports = {
     validatedVideoUrl,
     videoUrlForLog,
     normalizedThumbnailOptions,
+    validatedFfmpegOptions,
     ffmpegInputFormat,
 };
