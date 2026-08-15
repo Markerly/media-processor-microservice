@@ -121,11 +121,17 @@ unconditional `roles/run.invoker` binding, and why the OIDC proof gate exists:
 once the edge closes, rollback restores the previous revision but deliberately
 never restores public access.
 
-The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image and
-requires `_PLATFORM_OIDC_PROOF=platform-api@<exact 40-character serving SHA>`.
-A prose ticket, mutable label, stale SHA, or invented SHA cannot unlock the
-private cutover: before its first gcloud lookup, the release requires the exact
-commit in that proof to match production platform-api's `/versionz` attestation.
+The reviewed Cloud Build trigger builds an immutable `$COMMIT_SHA` image.
+`_PLATFORM_OIDC_PROOF=platform-api@<exact 40-character serving SHA>` is
+required **only while the service is still public** — that is the one
+question the pin answers, and it does not apply to later releases. The
+release reads the live IAM policy first; if `allUsers` (or
+`allAuthenticatedUsers`) still holds `roles/run.invoker`, it refuses the
+cutover unless the proof matches production platform-api `/versionz`. If
+the edge is already private, it skips the pin and relies on the live
+caller proofs (unconditional invoker, no public binding, authenticated
+200, anonymous 403). Restoring public access as break-glass makes the
+next release demand the proof again.
 The release
 deploys under the zero-role runtime identity, clears inherited secrets,
 database/VPC attachments including Direct VPC, volumes,

@@ -52,7 +52,8 @@ images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/media-processor-repo/media-processor:$COMMIT_SHA'
 
 substitutions:
-  # Release refuses Cloud Run mutations unless these are overridden and /versionz matches.
+  # Required only while the service is still public. Once private, the
+  # release skips this pin and proves the caller live on every run.
   _PLATFORM_OIDC_READY: 'false'
   _PLATFORM_OIDC_PROOF: 'UNSET'
 

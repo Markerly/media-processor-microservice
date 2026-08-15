@@ -182,24 +182,15 @@ run_release() {
   run_release_raw glassy-tube-622 "$commit_sha" "$build_id" "$1" "$2"
 }
 
-# The public-to-private cutover must be impossible without explicit evidence.
-reset_state
-set +e
-run_release false UNSET >/dev/null 2>&1
-status=$?
-set -e
-test "$status" -eq 78
-test ! -s "$state_dir/gcloud.log"
-
-# A prose receipt is not proof. The caller cutover must identify one exact
-# serving platform commit before the release can touch Cloud Run.
-reset_state
-set +e
-run_release true platform-api@reviewed-commit >/dev/null 2>&1
-status=$?
-set -e
-test "$status" -eq 64
-test ! -s "$state_dir/gcloud.log"
+assert_no_cloud_mutation() {
+  # The cutover attestation may read IAM (and only IAM) before deciding.
+  # What must never happen is a deploy or traffic change before the proof
+  # has either passed or been skipped because the edge is already private.
+  if grep -E 'run deploy |run services update-traffic' "$state_dir/gcloud.log"; then
+    echo "unexpected Cloud Run mutation before the cutover proof settled" >&2
+    return 1
+  fi
+}
 
 # Wrong-project and non-Cloud-Build identifiers fail before any cloud lookup.
 reset_state
@@ -213,22 +204,63 @@ test "$wrong_project_status" -eq 64
 test "$wrong_build_status" -eq 64
 test ! -s "$state_dir/gcloud.log"
 
-# A 40-hex receipt must match the commit the production caller attests through
-# /versionz. Stale, malformed, and unavailable evidence all fail before the
-# first gcloud read or mutation.
+# Still public, no proof: the cutover must refuse. A read of the IAM policy
+# is how it knows this is a cutover; that is not a mutation.
+reset_state
+set +e
+FAKE_PUBLIC_IAM=true run_release false UNSET >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 78
+grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
+assert_no_cloud_mutation
+
+# A prose receipt is not proof. While public, the cutover must identify one
+# exact serving platform commit before it can touch Cloud Run.
+reset_state
+set +e
+FAKE_PUBLIC_IAM=true run_release true platform-api@reviewed-commit >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 64
+grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
+assert_no_cloud_mutation
+
+# A 40-hex receipt must match the commit the production caller attests
+# through /versionz. Only required while the service is still public.
 for proof_case in stale malformed unavailable; do
   reset_state
   set +e
   case "$proof_case" in
-    stale) FAKE_PLATFORM_COMMIT="$(printf '%040d' 4)" run_release true "$oidc_proof" >/dev/null 2>&1 ;;
-    malformed) FAKE_PLATFORM_MALFORMED=true run_release true "$oidc_proof" >/dev/null 2>&1 ;;
-    unavailable) FAKE_PLATFORM_UNAVAILABLE=true run_release true "$oidc_proof" >/dev/null 2>&1 ;;
+    stale) FAKE_PUBLIC_IAM=true FAKE_PLATFORM_COMMIT="$(printf '%040d' 4)" run_release true "$oidc_proof" >/dev/null 2>&1 ;;
+    malformed) FAKE_PUBLIC_IAM=true FAKE_PLATFORM_MALFORMED=true run_release true "$oidc_proof" >/dev/null 2>&1 ;;
+    unavailable) FAKE_PUBLIC_IAM=true FAKE_PLATFORM_UNAVAILABLE=true run_release true "$oidc_proof" >/dev/null 2>&1 ;;
   esac
   proof_status=$?
   set -e
   test "$proof_status" -eq 78
-  test ! -s "$state_dir/gcloud.log"
+  grep -q 'run services get-iam-policy media-processor' "$state_dir/gcloud.log"
+  assert_no_cloud_mutation
 done
+
+# Already private, no proof: the one-time attestation does not apply.
+# The live IAM / auth-200 / anon-403 proofs still run.
+reset_state
+run_release false UNSET >/dev/null
+grep -q 'run deploy media-processor .*--image .*@sha256:' "$state_dir/gcloud.log"
+grep -q -- '--no-allow-unauthenticated' "$state_dir/gcloud.log"
+test ! -f "$state_dir/rolled-back"
+
+# Break-glass restored public access: the next release demands the proof
+# again. Same IAM shape as "still public"; named so a regression cannot
+# silently treat allUsers as "already cut over".
+reset_state
+set +e
+FAKE_PUBLIC_IAM=true run_release false UNSET >/dev/null 2>&1
+status=$?
+set -e
+test "$status" -eq 78
+assert_no_cloud_mutation
 
 # Happy path: immutable digest, private zero-traffic candidate, traffic shift,
 # live proof, and candidate-tag cleanup. No rollback should occur.
