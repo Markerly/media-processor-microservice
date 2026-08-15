@@ -97,18 +97,24 @@ if sa_policy="$(gcloud iam service-accounts get-iam-policy "$release_sa" \
   if python3 -c '
 import json, sys
 policy = json.loads(sys.argv[1])
-me = "serviceAccount:" + sys.argv[2]
-granted = [
-    binding
+needed = {
+    "serviceAccount:" + sys.argv[2],
+    "serviceAccount:132233585000@cloudbuild.gserviceaccount.com",
+}
+holders = {
+    member
     for binding in policy.get("bindings", [])
     if binding.get("role") == "roles/iam.serviceAccountOpenIdTokenCreator"
-    and me in binding.get("members", [])
-]
-raise SystemExit(0 if granted else 1)
+    for member in binding.get("members", [])
+}
+missing = sorted(needed - holders)
+if missing:
+    print("missing OpenIdTokenCreator on release SA: " + ", ".join(missing))
+    raise SystemExit(1)
 ' "$sa_policy" "$release_sa"; then
-    pass "$release_sa can generateIdToken for itself"
+    pass "Cloud Build and the release SA can generateIdToken as $release_sa"
   else
-    fail "$release_sa has no serviceAccountOpenIdTokenCreator self-binding; the authenticated /health proof cannot mint an ID token on Cloud Build"
+    fail "missing serviceAccountOpenIdTokenCreator on $release_sa (Cloud Build worker and/or self); the /health proof cannot mint an ID token"
   fi
 else
   unknown "cannot read IAM policy for $release_sa"
