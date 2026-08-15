@@ -4,11 +4,17 @@
  * Handles video thumbnail generation using FFmpeg
  */
 
-const ffmpeg = require('fluent-ffmpeg');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require('crypto');
 const chalk = require('chalk');
+const {
+    ffmpegInputFormat,
+    validatedFfmpegOptions,
+    validatedVideoUrl,
+    videoUrlForLog,
+} = require('../lib/videoUrlPolicy');
 
 /**
  * Configuration for thumbnail generation
@@ -27,8 +33,43 @@ const CONFIG = {
     processingTimeout: 25000, // 25 seconds (leave buffer for HTTP timeout)
 
     // Temp directory
-    tempDir: '/tmp'
+    tempDir: '/tmp',
+
+    // Cap the JPEG so a decoder bomb cannot fill the tmpfs.
+    maxOutputBytes: 5 * 1024 * 1024,
 };
+
+function buildFfmpegArgs(videoUrl, outputPath, config) {
+    const safeUrl = validatedVideoUrl(videoUrl);
+    const inputFormat = ffmpegInputFormat(safeUrl);
+    // Re-assert the option bounds here, not just at the HTTP route: every value
+    // below is spliced into FFmpeg's argument vector, and `-vf scale=W:H` is
+    // filter syntax that an unbounded width could extend into a file-reading
+    // filter. This is the last point at which that is still cheap to stop.
+    const bounded = validatedFfmpegOptions(config);
+    const quality = Math.max(1, Math.round((100 - bounded.quality) / 10));
+
+    return [
+        '-nostdin',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-protocol_whitelist', 'https,tls,tcp',
+        '-max_redirects', '0',
+        '-rw_timeout', '15000000',
+        '-ss', bounded.timePosition,
+        '-t', '1',
+        '-f', inputFormat,
+        '-i', safeUrl,
+        '-an',
+        '-frames:v', '1',
+        '-q:v', String(quality),
+        '-vf', `scale=${bounded.width}:${bounded.height}`,
+        '-f', 'image2',
+        '-fs', String(CONFIG.maxOutputBytes),
+        '-y',
+        outputPath,
+    ];
+}
 
 /**
  * Generates a thumbnail from a video URL
@@ -43,57 +84,68 @@ const CONFIG = {
  */
 async function generateThumbnail(videoUrl, options = {}) {
     const config = {
-        size: options.size || CONFIG.thumbnailSize,
+        width: options.width || 640,
+        height: options.height ?? -1,
         timePosition: options.timePosition || CONFIG.thumbnailTime,
         quality: options.quality || CONFIG.jpegQuality,
-        timeout: options.timeout || CONFIG.processingTimeout,
+        // The SIGKILL deadline is the only thing that bounds a stalled FFmpeg,
+        // so a caller may shorten it but never extend it past the configured
+        // ceiling. An unbounded value here would hold a Cloud Run request slot
+        // (one of two per instance) for as long as the peer keeps the socket open.
+        timeout: Number.isInteger(options.timeout) && options.timeout > 0
+            ? Math.min(options.timeout, CONFIG.processingTimeout)
+            : CONFIG.processingTimeout,
     };
 
-    // Generate unique output filename
-    const outputFilename = `thumb_${uuidv4()}.jpg`;
+    const outputFilename = `thumb_${randomUUID()}.jpg`;
     const outputPath = path.join(CONFIG.tempDir, outputFilename);
+    if (path.dirname(outputPath) !== CONFIG.tempDir) {
+        throw new Error('Unable to initialize thumbnail generation');
+    }
 
     console.log(chalk.cyan('[Thumbnail Generator] Starting generation'));
-    console.log(chalk.cyan('[Thumbnail Generator] Video URL:'), videoUrl);
+    console.log(chalk.cyan('[Thumbnail Generator] Video URL:'), videoUrlForLog(videoUrl));
     console.log(chalk.cyan('[Thumbnail Generator] Output path:'), outputPath);
     console.log(chalk.cyan('[Thumbnail Generator] Config:'), config);
 
     return new Promise((resolve, reject) => {
+        let settled = false;
+        const fail = async (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            await fs.unlink(outputPath).catch(() => {});
+            reject(error);
+        };
+
+        const args = buildFfmpegArgs(videoUrl, outputPath, config);
+        const command = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        command.stderr.on('data', () => {});
+
         const timeoutId = setTimeout(() => {
-            reject(new Error(`Thumbnail generation timed out after ${config.timeout}ms`));
+            command.kill('SIGKILL');
+            void fail(new Error('Thumbnail generation timed out'));
         }, config.timeout);
 
-        try {
-            ffmpeg(videoUrl)
-                // Seek to specific time
-                .seekInput(config.timePosition)
-                // Take only 1 frame and set scale filter
-                .outputOptions([
-                    '-vframes 1',
-                    `-q:v ${Math.round((100 - config.quality) / 10)}`,
-                    '-vf scale=640:-2' // Width 640, height auto (divisible by 2)
-                ])
-                // Set output
-                .output(outputPath)
-                // Handle completion
-                .on('end', () => {
-                    clearTimeout(timeoutId);
-                    console.log(chalk.green('[Thumbnail Generator] ✓ Thumbnail generated successfully:'), outputPath);
-                    resolve(outputPath);
-                })
-                // Handle errors
-                .on('error', (err) => {
-                    clearTimeout(timeoutId);
-                    console.error(chalk.red('[Thumbnail Generator] ✗ Error generating thumbnail:'), err);
-                    reject(new Error(`Failed to generate thumbnail: ${err.message}`));
-                })
-                // Start processing
-                .run();
-        } catch (error) {
+        command.once('error', (error) => {
+            console.error(chalk.red('[Thumbnail Generator] ✗ FFmpeg launch failed'), {
+                errorType: error?.name || 'Error'
+            });
+            void fail(new Error('Unable to initialize thumbnail generation'));
+        });
+
+        command.once('close', (code) => {
+            if (settled) return;
+            if (code !== 0) {
+                console.error(chalk.red('[Thumbnail Generator] ✗ FFmpeg failed'), { exitCode: code });
+                void fail(new Error('Failed to generate thumbnail'));
+                return;
+            }
+            settled = true;
             clearTimeout(timeoutId);
-            console.error(chalk.red('[Thumbnail Generator] ✗ Exception during setup:'), error);
-            reject(new Error(`Exception during thumbnail generation: ${error.message}`));
-        }
+            console.log(chalk.green('[Thumbnail Generator] ✓ Thumbnail generated successfully:'), outputPath);
+            resolve(outputPath);
+        });
     });
 }
 
@@ -108,12 +160,15 @@ async function cleanupThumbnail(thumbnailPath) {
         await fs.unlink(thumbnailPath);
         console.log(chalk.gray('[Thumbnail Generator] Cleaned up temp file:'), thumbnailPath);
     } catch (error) {
-        console.warn(chalk.yellow('[Thumbnail Generator] ⚠ Failed to cleanup temp file:'), error.message);
+        console.warn(chalk.yellow('[Thumbnail Generator] ⚠ Failed to cleanup temp file'), {
+            errorType: error?.name || 'Error'
+        });
     }
 }
 
 module.exports = {
     generateThumbnail,
     cleanupThumbnail,
+    buildFfmpegArgs,
     CONFIG
 };

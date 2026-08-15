@@ -1,108 +1,43 @@
-# Rate Limiting Documentation
+# Rate limiting
 
-## Overview
+**This service has no application-level rate limiting, deliberately.** If you are
+here to add some, read this first — it was removed on purpose, and the load it
+was meant to handle is the load it actually broke.
 
-The media processor microservice implements rate limiting to protect against abuse and control processing costs. Rate limits are applied per IP address.
+## Why there is none
 
-## Rate Limits
+Authorization is Cloud Run IAM: `roles/run.invoker` for the platform App Engine
+identity only. The service is private and has exactly one authorized caller. A
+per-IP rate limiter cannot protect a single trusted caller from anything — IAM
+already decides who may call — so its only possible effect is to drop that
+caller's own legitimate traffic.
 
-### General Endpoints
-- **Limit**: 100 requests per 15 minutes
-- **Applies to**: `/`, `/health`, and other non-processing endpoints
-- **Window**: 15 minutes (900 seconds)
+That is not hypothetical. The previous `express-rate-limit` setup (two limiters,
+100 requests / 15 min each, keyed on IP, in-memory per instance) rejected **84%
+of thumbnail requests** during a real report generation on 2026-08-14: 10,813×
+429 against 1,474× 200. Because `platform-api` retries a 429 with backoff, the
+retries spent the very budget they were waiting on — the limiter and the retry
+loop defeated each other. See issue #4.
 
-### Thumbnail Generation
-- **Limit**: 50 requests per 15 minutes
-- **Applies to**: `POST /generate-thumbnail`
-- **Window**: 15 minutes (900 seconds)
-- **Reason**: More restrictive due to resource-intensive FFmpeg processing
+## What bounds cost and blast radius instead
 
-## Response Headers
+Cloud Run's own admission control, which a per-IP app limiter cannot improve on:
 
-All requests include rate limit information in response headers:
+- `--concurrency 2` — at most two in-flight FFmpeg processes per instance
+- `--max-instances 10` — a hard ceiling on horizontal fan-out
+- the per-request timeout in `thumbnailGenerator.js` — no request pins a slot open
 
-```
-ratelimit-policy: 100;w=900
-ratelimit-limit: 100
-ratelimit-remaining: 95
-ratelimit-reset: 654
-```
+When the service is genuinely saturated, Cloud Run returns 429 itself, and the
+platform caller's existing backoff handles it. Those 429s mean "at capacity",
+not "you tripped an artificial per-IP counter that fires far below capacity".
 
-- `ratelimit-policy`: Rate limit policy (limit;window in seconds)
-- `ratelimit-limit`: Maximum requests allowed in window
-- `ratelimit-remaining`: Requests remaining in current window
-- `ratelimit-reset`: Seconds until rate limit window resets
+## If you think you need it back
 
-## Rate Limit Exceeded Response
+You almost certainly need a different lever:
 
-When rate limit is exceeded, the service returns:
-
-**Status Code**: `429 Too Many Requests`
-
-**Response Body**:
-```json
-{
-  "error": "Too many thumbnail requests",
-  "message": "You have exceeded the rate limit of 50 requests per 15 minutes. Please try again later.",
-  "retryAfter": "15 minutes"
-}
-```
-
-## Testing Rate Limits
-
-### Using curl
-```bash
-# Check rate limit headers
-curl -v https://media-processor-65la52ndha-uc.a.run.app/ 2>&1 | grep -i ratelimit
-
-# Test thumbnail endpoint
-curl -X POST https://media-processor-65la52ndha-uc.a.run.app/generate-thumbnail \
-  -H "Content-Type: application/json" \
-  -d '{"videoUrl": "https://example.com/video.mp4"}' \
-  -v 2>&1 | grep -i ratelimit
-```
-
-### Using test scripts
-```bash
-# Run comprehensive rate limit test
-./test-rate-limit.sh
-```
-
-## Configuration
-
-Rate limits can be adjusted in `src/middleware/rateLimiter.js`:
-
-```javascript
-const thumbnailLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 50, // Adjust this value
-    // ... other options
-});
-```
-
-## Bypassing Rate Limits
-
-Health check endpoint (`/health`) is excluded from rate limiting to allow monitoring systems to check service status without consuming rate limit quota.
-
-## Implementation Details
-
-- **Package**: `express-rate-limit`
-- **Storage**: In-memory (resets when service restarts)
-- **Identification**: By IP address
-- **Headers**: Standard RateLimit headers (RFC draft)
-
-## Cost Considerations
-
-Rate limiting helps control costs by:
-1. Preventing excessive FFmpeg processing
-2. Limiting concurrent resource usage
-3. Protecting against unintentional or malicious abuse
-4. Ensuring fair resource allocation across users
-
-## Future Enhancements
-
-Potential improvements:
-- Redis-based storage for distributed rate limiting
-- API key-based rate limits (higher limits for authenticated requests)
-- Dynamic rate limits based on resource availability
-- Custom rate limits per client/organization
+- Runaway cost → lower `--max-instances`, or shorten the request timeout.
+- One caller monopolising capacity → that is a scheduling problem in the caller,
+  not an edge concern; fix it where the fan-out is issued.
+- The service went public → do not paper over it with a limiter. A public
+  media-processing endpoint is an SSRF/abuse surface; the release's anonymous-403
+  probe exists to keep that from ever shipping.

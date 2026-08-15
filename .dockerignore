@@ -1,8 +1,10 @@
 node_modules
 npm-debug.log
 .git
+.github
 .gitignore
 README.md
+DEVELOPER_SETUP.md
 .env
 .nyc_output
 coverage

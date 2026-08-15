@@ -4,11 +4,53 @@
 
 const express = require('express');
 const fs = require('fs');
-const { generateThumbnail, cleanupThumbnail } = require('../services/thumbnailGenerator');
-const { thumbnailLimiter } = require('../middleware/rateLimiter');
+const path = require('path');
+const { generateThumbnail, cleanupThumbnail, CONFIG } = require('../services/thumbnailGenerator');
 const chalk = require('chalk');
+const {
+    VideoUrlValidationError,
+    normalizedThumbnailOptions,
+    validatedVideoUrl,
+    videoUrlForLog,
+} = require('../lib/videoUrlPolicy');
 
 const router = express.Router();
+
+/**
+ * A failure this file constructs itself. The distinction matters for logging:
+ * these messages are authored here and provably carry no request data, no
+ * signed URL, and no third-party exception text, so they are safe to record in
+ * full. FFmpeg, fs, and HTTP-client exceptions are not, and stay redacted to
+ * their `name`.
+ */
+class ThumbnailIntegrityError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'ThumbnailIntegrityError';
+    }
+}
+
+// Each branch names its own cause. Collapsing all three into "file is empty"
+// made the single log line an operator sees during an incident describe a
+// defect that had not occurred.
+function assertJpegThumbnail(thumbnailPath) {
+    const resolved = path.resolve(thumbnailPath);
+    if (path.dirname(resolved) !== CONFIG.tempDir || path.extname(resolved) !== '.jpg') {
+        throw new ThumbnailIntegrityError(`generated thumbnail escaped ${CONFIG.tempDir}/*.jpg`);
+    }
+    const header = Buffer.alloc(3);
+    const fd = fs.openSync(resolved, 'r');
+    try {
+        if (fs.readSync(fd, header, 0, 3, 0) !== 3) {
+            throw new ThumbnailIntegrityError('generated thumbnail is shorter than a JPEG header');
+        }
+    } finally {
+        fs.closeSync(fd);
+    }
+    if (header[0] !== 0xff || header[1] !== 0xd8 || header[2] !== 0xff) {
+        throw new ThumbnailIntegrityError('generated thumbnail is not JPEG (missing SOI marker)');
+    }
+}
 
 /**
  * POST /generate-thumbnail
@@ -24,88 +66,84 @@ const router = express.Router();
  * }
  *
  * Returns: Thumbnail image file (image/jpeg)
- * Rate limit: 50 requests per 15 minutes per IP
+ * Access: Cloud Run IAM only (private). No per-request rate limit — see index.js.
  */
-router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
-    const { videoUrl, timePosition, size, quality } = req.body;
+router.post('/generate-thumbnail', async (req, res) => {
+    const { videoUrl: presentedVideoUrl, timePosition, size, quality } = req.body || {};
 
-    // Validation: videoUrl is required
-    if (!videoUrl) {
+    if (!presentedVideoUrl) {
         return res.status(400).json({
             error: 'Bad Request',
             message: 'videoUrl is required'
         });
     }
 
-    // Validation: Must be a Google Cloud Storage URL
-    if (!videoUrl.includes('storage.googleapis.com') && !videoUrl.includes('storage.cloud.google.com')) {
+    let videoUrl;
+    let options;
+    try {
+        videoUrl = validatedVideoUrl(presentedVideoUrl);
+        options = normalizedThumbnailOptions({ timePosition, size, quality });
+    } catch (error) {
+        if (!(error instanceof VideoUrlValidationError)) throw error;
         return res.status(400).json({
             error: 'Bad Request',
-            message: 'Only Google Cloud Storage URLs are supported'
-        });
-    }
-
-    // Validation: Must be a video file (check extension)
-    const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.m4v', '.mpeg', '.mpg'];
-    const urlLower = videoUrl.toLowerCase();
-    const hasVideoExtension = videoExtensions.some(ext => urlLower.includes(ext));
-
-    if (!hasVideoExtension) {
-        return res.status(400).json({
-            error: 'Bad Request',
-            message: 'URL must point to a valid video file (.mp4, .mov, .avi, .mkv, .webm, .flv, .m4v, .mpeg, .mpg)'
+            message: 'The video URL or thumbnail options are invalid'
         });
     }
 
     let thumbnailPath = null;
 
     try {
-        console.log(chalk.cyan('[Thumbnail Route] Request received for video:'), videoUrl);
+        console.log(chalk.cyan('[Thumbnail Route] Request received for video:'), videoUrlForLog(videoUrl));
 
-        // Generate thumbnail
-        thumbnailPath = await generateThumbnail(videoUrl, {
-            timePosition,
-            size,
-            quality
-        });
+        thumbnailPath = await generateThumbnail(videoUrl, options);
 
-        // Check if file exists and has content
         const stats = fs.statSync(thumbnailPath);
         if (stats.size === 0) {
-            throw new Error('Generated thumbnail file is empty');
+            throw new ThumbnailIntegrityError('generated thumbnail file is empty');
         }
+        assertJpegThumbnail(thumbnailPath);
 
         console.log(chalk.green('[Thumbnail Route] ✓ Sending thumbnail file:'), thumbnailPath, chalk.gray(`(${stats.size} bytes)`));
 
-        // Send file as response
-        res.sendFile(thumbnailPath, (err) => {
+        res.sendFile(path.basename(thumbnailPath), {
+            root: CONFIG.tempDir,
+            dotfiles: 'deny',
+            headers: { 'Content-Type': 'image/jpeg' },
+        }, (err) => {
             if (err) {
-                console.error(chalk.red('[Thumbnail Route] ✗ Error sending file:'), err);
+                console.error(chalk.red('[Thumbnail Route] ✗ Error sending file'), {
+                    errorType: err?.name || 'Error'
+                });
                 if (!res.headersSent) {
                     res.status(500).json({
                         error: 'Failed to send thumbnail',
-                        message: err.message
+                        message: 'Unable to return the generated thumbnail'
                     });
                 }
             }
 
-            // Cleanup after sending (or on error)
             if (thumbnailPath) {
-                cleanupThumbnail(thumbnailPath).catch(console.error);
+                cleanupThumbnail(thumbnailPath).catch(() => {});
             }
         });
 
     } catch (error) {
-        console.error(chalk.red('[Thumbnail Route] ✗ Error:'), error);
+        console.error(chalk.red('[Thumbnail Route] ✗ Processing failed'), {
+            errorType: error?.name || 'Error',
+            // Only messages this service authored are safe to log verbatim;
+            // FFmpeg and HTTP-client exception text can carry the signed URL
+            // and object path this service is required never to record.
+            ...(error instanceof ThumbnailIntegrityError ? { reason: error.message } : {}),
+        });
 
-        // Cleanup on error
         if (thumbnailPath) {
-            cleanupThumbnail(thumbnailPath).catch(console.error);
+            cleanupThumbnail(thumbnailPath).catch(() => {});
         }
 
         res.status(500).json({
             error: 'Thumbnail generation failed',
-            message: error.message
+            message: 'The thumbnail could not be generated'
         });
     }
 });
