@@ -435,16 +435,33 @@ matches = [item["url"] for item in traffic if item.get("tag") == tag]
 assert len(matches) == 1, f"expected one candidate URL for {tag}, got {matches}"
 print(matches[0])
 ' "$candidate_tag" <<<"$service_json")"
+# Cloud Build's user-managed SA cannot satisfy `gcloud auth print-identity-token`
+# ("No identity token can be obtained from the current credentials"). The
+# metadata server can: that is how this worker authenticates to Cloud Run.
+# Fall back to gcloud so the local fake-gcloud suite still exercises the proof.
+mint_id_token() {
+  local audience="$1" token
+  token="$(curl --fail --silent --show-error --max-time 5 \
+    -H 'Metadata-Flavor: Google' \
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=${audience}" \
+    || true)"
+  if [[ "$token" == *.* ]]; then
+    printf '%s\n' "$token"
+    return 0
+  fi
+  gcloud auth print-identity-token --audiences="$audience"
+}
+
 assert_runtime_revision "$candidate_revision"
 assert_invocation_iam
 assert_accepted_audiences <<<"$service_json"
-id_token="$(gcloud auth print-identity-token --audiences="$service_url")"
+id_token="$(mint_id_token "$service_url")"
 # The platform caller mints for $platform_audience, not status.url. We cannot
 # mint as the App Engine SA (getOpenIdToken is self-only on that identity).
 # Audience is a property of the token, not the principal: a 200 here with a
 # token whose aud is the platform origin proves Cloud Run will accept the
 # token platform-api actually sends, once the edge is private.
-platform_id_token="$(gcloud auth print-identity-token --audiences="$platform_audience")"
+platform_id_token="$(mint_id_token "$platform_audience")"
 
 printf 'header = "Authorization: Bearer %s"\n' "$id_token" \
   | curl --config - --fail --silent --show-error --max-time 15 \

@@ -261,5 +261,15 @@ if [[ "$unknowns" -gt 0 ]]; then
   echo "Nothing here says the release is unsafe - it says it is unverified. Fix access and re-run." >&2
   exit 2
 fi
-echo "PREFLIGHT PASSED. Remaining human steps: force a real thumbnail through"
-echo "platform-api and retain its request/log trace before approving."
+if [[ -n "${policy:-}" ]] && python3 -c '
+import json, sys
+members = {m for b in json.loads(sys.argv[1]).get("bindings", [])
+           if b.get("role") == "roles/run.invoker"
+           for m in b.get("members", [])}
+raise SystemExit(0 if members & {"allUsers", "allAuthenticatedUsers"} else 1)
+' "$policy"; then
+  echo "PREFLIGHT PASSED. Remaining human steps: force a real thumbnail through"
+  echo "platform-api and retain its request/log trace before approving the cutover."
+else
+  echo "PREFLIGHT PASSED. Service is already private."
+fi
