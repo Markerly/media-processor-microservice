@@ -20,7 +20,7 @@
   "devDependencies": {
     "eslint": "^8.54.0",
     "jest": "^29.7.0",
-    "nodemon": "^3.0.1",
+    "nodemon": "^3.1.14",
     "supertest": "^6.3.3"
   },
   "engines": {
