@@ -57,7 +57,10 @@ substitutions:
   _PLATFORM_OIDC_READY: 'false'
   _PLATFORM_OIDC_PROOF: 'UNSET'
 
-serviceAccount: 'projects/$PROJECT_ID/serviceAccounts/media-processor-release@$PROJECT_ID.iam.gserviceaccount.com'
+# Pinned, not $PROJECT_ID: this field is not reliably substituted, and a
+# literal "$PROJECT_ID" in the email makes Cloud Build silently fall back
+# to the default Cloud Build SA (which cannot mint ID tokens).
+serviceAccount: 'projects/glassy-tube-622/serviceAccounts/media-processor-release@glassy-tube-622.iam.gserviceaccount.com'
 
 timeout: 1200s
 

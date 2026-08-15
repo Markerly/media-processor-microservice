@@ -501,17 +501,25 @@ mint_id_token() {
   # The worker *is* this SA. generateIdToken on itself requires the
   # serviceAccountOpenIdTokenCreator self-binding (preflight checks it).
   access="$(gcloud auth print-access-token)"
-  token="$(curl --fail --silent --show-error --max-time 15 \
+  creds_json="$(curl --silent --show-error --max-time 15 \
     -H "Authorization: Bearer ${access}" \
     -H 'Content-Type: application/json' \
     --data-binary "{\"audience\":\"${audience}\",\"includeEmail\":true}" \
     "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${release_service_account}:generateIdToken" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token") or "")' \
     || true)"
+  token="$(printf '%s' "$creds_json" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    print((json.loads(raw) or {}).get("token") or "")
+except Exception:
+    print("")
+' || true)"
   if [[ "$token" == *.* && "$token" != *' '* ]]; then
     printf '%s\n' "$token"
     return 0
   fi
+  echo "iamcredentials.generateIdToken did not return a token: ${creds_json:0:400}" >&2
   gcloud auth print-identity-token --audiences="$audience"
 }
 
