@@ -6,7 +6,6 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { generateThumbnail, cleanupThumbnail, CONFIG } = require('../services/thumbnailGenerator');
-const { thumbnailLimiter } = require('../middleware/rateLimiter');
 const chalk = require('chalk');
 const {
     VideoUrlValidationError,
@@ -67,9 +66,9 @@ function assertJpegThumbnail(thumbnailPath) {
  * }
  *
  * Returns: Thumbnail image file (image/jpeg)
- * Rate limit: 100 requests per 15 minutes per IP
+ * Access: Cloud Run IAM only (private). No per-request rate limit — see index.js.
  */
-router.post('/generate-thumbnail', thumbnailLimiter, async (req, res) => {
+router.post('/generate-thumbnail', async (req, res) => {
     const { videoUrl: presentedVideoUrl, timePosition, size, quality } = req.body || {};
 
     if (!presentedVideoUrl) {

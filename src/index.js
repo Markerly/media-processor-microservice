@@ -3,14 +3,18 @@ const helmet = require('helmet');
 const compression = require('compression');
 const winston = require('winston');
 const chalk = require('chalk');
-const { generalLimiter } = require('./middleware/rateLimiter');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Trust proxy - required for Cloud Run/App Engine and other proxies
-// This allows express-rate-limit to correctly identify users via X-Forwarded-For
-app.set('trust proxy', 1);
+// No application-level rate limiting. This service is private: authorization is
+// Cloud Run IAM (roles/run.invoker for the platform App Engine identity only),
+// and the single authorized caller retries on 429. A per-IP, per-instance,
+// in-memory limiter therefore protected nothing an IAM boundary does not — it
+// only dropped that one caller's legitimate burst load. Cost and blast radius
+// are bounded by Cloud Run's own admission control (--concurrency 2,
+// --max-instances 10) and the per-request timeout, which a limiter cannot
+// improve on for a single trusted caller. See RATE_LIMITING.md and issue #4.
 
 // Configure logger
 const logger = winston.createLogger({
@@ -35,10 +39,6 @@ app.use(express.json({ limit: '16kb' }));
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
-
-// Apply general rate limiting after health so liveness checks cannot consume
-// the application request budget.
-app.use(generalLimiter);
 
 // Basic info endpoint
 app.get('/', (req, res) => {
@@ -85,9 +85,7 @@ function start() {
   console.log(chalk.gray('    GET  /health'));
   console.log(chalk.gray('    POST /generate-thumbnail'));
   console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-  console.log(chalk.gray('  Rate Limits:'));
-  console.log(chalk.gray('    General: 100 requests per 15 minutes'));
-  console.log(chalk.gray('    Thumbnails: 50 requests per 15 minutes'));
+  console.log(chalk.gray('  Access: Cloud Run IAM (private); cost bounded by concurrency + max-instances'));
   console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'));
 
   logger.info(`Media processor service listening on port ${PORT}`);
