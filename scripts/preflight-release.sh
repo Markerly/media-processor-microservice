@@ -238,11 +238,21 @@ if serving="$(curl --fail --silent --show-error --proto '=https' --max-time 15 \
     <<<"$serving" 2>/dev/null || true)"
   if [[ "$commit" =~ ^[a-f0-9]{40}$ ]]; then
     pass "platform-api is serving $commit"
-    echo
-    echo "  Approve the build with:"
-    echo "    _PLATFORM_OIDC_READY=true"
-    echo "    _PLATFORM_OIDC_PROOF=platform-api@$commit"
-    note "this SHA moves on every platform-api deploy - re-run immediately before approving"
+    if [[ -n "${policy:-}" ]] && python3 -c '
+import json, sys
+members = {m for b in json.loads(sys.argv[1]).get("bindings", [])
+           if b.get("role") == "roles/run.invoker"
+           for m in b.get("members", [])}
+raise SystemExit(0 if members & {"allUsers", "allAuthenticatedUsers"} else 1)
+' "$policy"; then
+      echo
+      echo "  Approve the cutover build with:"
+      echo "    _PLATFORM_OIDC_READY=true"
+      echo "    _PLATFORM_OIDC_PROOF=platform-api@$commit"
+      note "this SHA moves on every platform-api deploy - re-run immediately before approving"
+    else
+      note "service is already private — the release does not need these substitutions"
+    fi
   else
     fail "/versionz did not report a 40-character commit"
   fi

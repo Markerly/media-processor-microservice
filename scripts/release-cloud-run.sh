@@ -24,50 +24,6 @@ if [[ ! "$build_id" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]
   echo "release requires the exact Cloud Build UUID" >&2
   exit 64
 fi
-if [[ "$oidc_ready" != true || "$oidc_proof" == UNSET || -z "$oidc_proof" ]]; then
-  echo "private cutover blocked: deploy and prove the platform-api OIDC caller first" >&2
-  echo "set _PLATFORM_OIDC_READY=true and record _PLATFORM_OIDC_PROOF in the approved build" >&2
-  exit 78
-fi
-if [[ ! "$oidc_proof" =~ ^platform-api@[a-f0-9]{40}$ ]]; then
-  echo "OIDC proof must pin the exact serving platform-api Git commit" >&2
-  exit 64
-fi
-
-# Refuse Cloud Run mutations unless production /versionz commit equals the proof SHA.
-platform_commit="${oidc_proof#platform-api@}"
-# Bare service host, not a tenant slug. /versionz is mounted ahead of platform-api's
-# tenant resolution, so both spellings answer identically today — but the tenant
-# form additionally depends on App Engine soft-routing an unknown version name to
-# the default one. platform-api's own stale-deploy guard pins the bare host for
-# exactly this reason; matching it keeps this gate independent of which tenants exist.
-platform_version_url='https://platform-api-dot-glassy-tube-622.appspot.com/versionz'
-if ! platform_version_json="$(curl --fail --silent --show-error --proto '=https' --max-time 15 --max-filesize 16384 "$platform_version_url")"; then
-  echo "private cutover blocked: platform-api /versionz is unreachable" >&2
-  exit 78
-fi
-if [[ "${#platform_version_json}" -gt 16384 ]]; then
-  echo "private cutover blocked: platform-api /versionz is unreachable" >&2
-  exit 78
-fi
-if ! python3 -c '
-import json, re, sys
-try:
-    version = json.load(sys.stdin)
-    expected = sys.argv[1]
-    assert isinstance(version, dict)
-    assert version.get("ok") is True
-    assert version.get("gae_service") == "platform-api"
-    assert version.get("gae_version") == "production"
-    assert re.fullmatch(r"[a-f0-9]{40}", str(version.get("commit", "")))
-    assert version.get("commit") == expected
-except Exception as error:
-    print(f"platform-api serving-commit proof failed: {type(error).__name__}", file=sys.stderr)
-    raise SystemExit(1)
-' "$platform_commit" <<<"$platform_version_json"; then
-  echo "private cutover blocked: reviewed platform-api commit is not serving" >&2
-  exit 78
-fi
 
 service='media-processor'
 region='us-central1'
@@ -84,6 +40,89 @@ release_service_account="media-processor-release@$project.iam.gserviceaccount.co
 platform_audience='https://media-processor-132233585000.us-central1.run.app'
 hash_audience='https://media-processor-65la52ndha-uc.a.run.app'
 accepted_audiences="${platform_audience},${hash_audience}"
+
+# The platform-api /versionz pin answers "is the ID-token caller deployed?"
+# That question only matters while this service is still public and about to
+# stop being so. Once the boundary exists, every release already proves the
+# caller can invoke (IAM + authenticated 200 + anonymous 403). Leaving the
+# pin in place forever couples media hotfixes to platform-api's deploy
+# cadence — and the usual outcome of that friction is someone routing
+# around the gate. Read the live policy first; require the attestation
+# only when this release is the cutover. Restoring allUsers as break-glass
+# makes the next release demand the proof again.
+service_has_public_invoker() {
+  local policy_json
+  policy_json="$(gcloud run services get-iam-policy "$service" \
+    --project "$project" \
+    --region "$region" \
+    --format=json)"
+  python3 -c '
+import json, sys
+policy = json.load(sys.stdin)
+public = {"allUsers", "allAuthenticatedUsers"}
+members = {
+    member
+    for binding in policy.get("bindings", [])
+    if binding.get("role") == "roles/run.invoker"
+    for member in binding.get("members", [])
+}
+raise SystemExit(0 if members & public else 1)
+' <<<"$policy_json"
+}
+
+require_cutover_oidc_proof() {
+  if [[ "$oidc_ready" != true || "$oidc_proof" == UNSET || -z "$oidc_proof" ]]; then
+    echo "private cutover blocked: deploy and prove the platform-api OIDC caller first" >&2
+    echo "set _PLATFORM_OIDC_READY=true and record _PLATFORM_OIDC_PROOF in the approved build" >&2
+    exit 78
+  fi
+  if [[ ! "$oidc_proof" =~ ^platform-api@[a-f0-9]{40}$ ]]; then
+    echo "OIDC proof must pin the exact serving platform-api Git commit" >&2
+    exit 64
+  fi
+
+  local platform_commit="${oidc_proof#platform-api@}"
+  # Bare service host, not a tenant slug. /versionz is mounted ahead of
+  # platform-api's tenant resolution, so both spellings answer identically
+  # today — but the tenant form additionally depends on App Engine
+  # soft-routing an unknown version name to the default one.
+  local platform_version_url='https://platform-api-dot-glassy-tube-622.appspot.com/versionz'
+  local platform_version_json
+  if ! platform_version_json="$(curl --fail --silent --show-error --proto '=https' --max-time 15 --max-filesize 16384 "$platform_version_url")"; then
+    echo "private cutover blocked: platform-api /versionz is unreachable" >&2
+    exit 78
+  fi
+  if [[ "${#platform_version_json}" -gt 16384 ]]; then
+    echo "private cutover blocked: platform-api /versionz is unreachable" >&2
+    exit 78
+  fi
+  if ! python3 -c '
+import json, re, sys
+try:
+    version = json.load(sys.stdin)
+    expected = sys.argv[1]
+    assert isinstance(version, dict)
+    assert version.get("ok") is True
+    assert version.get("gae_service") == "platform-api"
+    assert version.get("gae_version") == "production"
+    assert re.fullmatch(r"[a-f0-9]{40}", str(version.get("commit", "")))
+    assert version.get("commit") == expected
+except Exception as error:
+    print(f"platform-api serving-commit proof failed: {type(error).__name__}", file=sys.stderr)
+    raise SystemExit(1)
+' "$platform_commit" <<<"$platform_version_json"; then
+    echo "private cutover blocked: reviewed platform-api commit is not serving" >&2
+    exit 78
+  fi
+}
+
+if service_has_public_invoker; then
+  echo "service is public; this release performs the cutover and requires the OIDC attestation"
+  require_cutover_oidc_proof
+else
+  echo "service is already private; skipping the one-time platform-api OIDC cutover attestation"
+fi
+
 image="us-central1-docker.pkg.dev/$project/media-processor-repo/media-processor:$commit_sha"
 digest="$(gcloud artifacts docker images describe "$image" \
   --project "$project" \
