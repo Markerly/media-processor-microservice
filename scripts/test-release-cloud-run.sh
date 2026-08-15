@@ -16,6 +16,16 @@ cat >"$fake_bin/gcloud" <<'FAKE_GCLOUD'
 set -Eeuo pipefail
 printf '%s\n' "$*" >>"$FAKE_GCLOUD_LOG"
 
+if [[ "${1:-} ${2:-}" == 'auth print-access-token' ]]; then
+  printf 'fake-access-token\n'
+  exit 0
+fi
+
+if [[ "${1:-} ${2:-}" == 'auth print-identity-token' ]]; then
+  printf 'fake-id-token\n'
+  exit 0
+fi
+
 if [[ "$*" == 'artifacts docker images describe '* ]]; then
   printf 'sha256:%064d\n' 0
   exit 0
@@ -77,11 +87,6 @@ if [[ "$1 $2" == 'run deploy' ]]; then
     fi
     shift
   done
-  exit 0
-fi
-
-if [[ "$1 $2" == 'auth print-identity-token' ]]; then
-  printf 'fake-id-token\n'
   exit 0
 fi
 
