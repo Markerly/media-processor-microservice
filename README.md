@@ -72,6 +72,26 @@ Do not add `--allow-unauthenticated`, grant project-wide Editor/Owner, restore
 the deleted workstation IAM scripts, or deploy with the default Compute Engine
 service account.
 
+## Preflight
+
+Before approving a release build, run:
+
+```sh
+bash scripts/preflight-release.sh
+```
+
+It is read-only and answers, in one pass, the rollout checks that were otherwise
+prose: both least-privilege identities exist, the Artifact Registry repository
+exists, the platform caller holds an unconditional `roles/run.invoker` binding,
+the release identity holds the project-level invoker its own health proof needs,
+whether the service is still public (i.e. whether this release performs the
+cutover), and the exact `_PLATFORM_OIDC_PROOF` value to paste.
+
+A check it could not run reports `UNKNOWN` and exits 2, never `FAIL`. Expired
+credentials and a missing binding mean opposite things — "look again" versus "do
+not release" — and a preflight that renders them identically would be the same
+class of guard-shaped object this release exists to remove.
+
 ## Release and rollback
 
 Sequencing caveat, because `--no-traffic` does not isolate it: the
