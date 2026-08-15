@@ -475,16 +475,40 @@ assert len(matches) == 1, f"expected one candidate URL for {tag}, got {matches}"
 print(matches[0])
 ' "$candidate_tag" <<<"$service_json")"
 # Cloud Build's user-managed SA cannot satisfy `gcloud auth print-identity-token`
-# ("No identity token can be obtained from the current credentials"). The
-# metadata server can: that is how this worker authenticates to Cloud Run.
-# Fall back to gcloud so the local fake-gcloud suite still exercises the proof.
+# and its metadata server 404s /identity (a25d3818). Mint via IAM Credentials
+# generateIdToken on this same identity, then fall back to gcloud so the local
+# fake-gcloud suite still exercises the proof.
 mint_id_token() {
-  local audience="$1" token
+  local audience="$1" token access
+  # Cloud Build's metadata server 404s /identity for a user-managed SA
+  # (observed on a25d3818). Try it anyway so the same script works on GCE.
   token="$(curl --fail --silent --show-error --max-time 5 \
     -H 'Metadata-Flavor: Google' \
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=${audience}" \
     || true)"
-  if [[ "$token" == *.* ]]; then
+  if [[ "$token" == *.* && "$token" != *' '* ]]; then
+    printf '%s\n' "$token"
+    return 0
+  fi
+  token="$(curl --fail --silent --show-error --max-time 5 \
+    -H 'Metadata-Flavor: Google' \
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/${release_service_account}/identity?audience=${audience}" \
+    || true)"
+  if [[ "$token" == *.* && "$token" != *' '* ]]; then
+    printf '%s\n' "$token"
+    return 0
+  fi
+  # The worker *is* this SA. generateIdToken on itself requires the
+  # serviceAccountOpenIdTokenCreator self-binding (preflight checks it).
+  access="$(gcloud auth print-access-token)"
+  token="$(curl --fail --silent --show-error --max-time 15 \
+    -H "Authorization: Bearer ${access}" \
+    -H 'Content-Type: application/json' \
+    --data-binary "{\"audience\":\"${audience}\",\"includeEmail\":true}" \
+    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${release_service_account}:generateIdToken" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token") or "")' \
+    || true)"
+  if [[ "$token" == *.* && "$token" != *' '* ]]; then
     printf '%s\n' "$token"
     return 0
   fi
